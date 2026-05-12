@@ -1,0 +1,28 @@
+{
+  "name": "luma-event-manager-otp",
+  "version": "2.2.0",
+  "description": "Luma Event Manager — fork of mariovallereyes/luma-event-manager. Replaces cookie-paste with in-chat email + OTP via the platform's skill_credentials service.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "luma",
+    "events",
+    "calendar",
+    "clawdbot",
+    "skill",
+    "scraping",
+    "otp",
+    "skill_credentials"
+  ],
+  "author": "samuel@deepshare.ai",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.40",
+    "cheerio": "^1.2.0",
+    "typescript": "^5.9.3"
+  }
+}

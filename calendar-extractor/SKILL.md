@@ -25,55 +25,79 @@ metadata:
 # Register (first use)
 node scripts/register.js <userId> <name>
 
-# Run today's flow (also what the cron triggers)
-node scripts/calendar-extractor.js <userId>
+# Step 1 — fetch recent transcripts as JSON (the agent extracts events from this)
+node scripts/calendar-extractor.js <userId> fetch [--hours N] [--limit N]
+
+# Step 2 — push: pipe the extracted-events JSON array to stdin; dedups + delivers to iOS
+echo '<events-json-array>' | node scripts/calendar-extractor.js <userId> push
 
 # Push management
-node scripts/push-toggle.js on <userId> [--time HH:MM] [--channel iOS|Telegram|Discord|Slack]
+node scripts/push-toggle.js on <userId> [--time HH:MM] [--tz IANA] [--channel iOS|Telegram|Discord|Slack]
 node scripts/push-toggle.js off <userId>
 node scripts/push-toggle.js status <userId>
 ```
 
 ## Workflow
 
-1. Fetch recent transcripts via the LLM's javis_mcp tools (get_transcript_tool / search_transcripts_tool) and pass the relevant text to this script on stdin.
-2. Fetch from the configured HTTP endpoint (set HTTP_SOURCE_URL env var when registering the cron).
-3. Format output and POST to `http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<formatted>"}` using `OPENCLAW_GATEWAY_TOKEN` for auth.
+This skill is a two-step pipeline: the **script** does the I/O (fetch transcripts, dedup, push),
+the **agent/LLM** does the reasoning (extract events). Extraction is not hardcoded — the agent
+reads the fetched transcripts and emits a JSON array of events.
+
+1. **Fetch** — `node scripts/calendar-extractor.js <userId> fetch` issues
+   `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
+   `OPENCLAW_GATEWAY_TOKEN` bearer and prints `{ "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
+2. **Extract** — the agent reads that JSON and produces an events array. Each event:
+   `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id) }`.
+3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
+   - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
+   - best-effort mirrors all events to `POST /api/skill/data` (upsert by `dedup_key`) for the iOS app to read,
+   - formats the **new** events as a markdown digest and delivers it via
+     `POST http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<markdown>"}`.
 
 ## Push setup (cron registration)
 
-When user requests scheduled push:
+When the user requests scheduled push:
 
 ### Step 1: Save preferences
 ```bash
-node scripts/push-toggle.js on <userId> --time <HH:MM> --channel <channel>
+node scripts/push-toggle.js on <userId> --time 08:00 --tz America/Los_Angeles
 ```
+This prints the ready-to-run `openclaw cron add` command (it derives the crontab from `--time`).
 
-### Step 2: Create cron job via openclaw CLI
+### Step 2: Create the cron job via openclaw CLI
+The default twice-daily schedule (08:00 & 18:00 America/Los_Angeles). Note the real openclaw flags
+— `--cron` (not `--schedule`) for the expression and `--message` (not `--command`) for the agent payload:
+
 ```bash
 openclaw cron add \
   --name "calendar-extractor-<userId>" \
-  --schedule "0 8,18 * * *" \
+  --cron "0 8,18 * * *" \
   --tz "America/Los_Angeles" \
-  --channel <channel> \
-  --to "<channel-target-id>" \
   --session isolated \
-  --command "Run /calendar-extractor: execute node scripts/calendar-extractor.js <userId>, format output nicely. Then POST to http://javis-server:8000/api/agent/push with JSON body {\"skill\": \"calendar-extractor\", \"content\": \"<formatted output>\"} using the gateway bearer token for auth."
+  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref). Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
 ```
 
 ### Step 3: Confirm to user
 Push is set up; results land in iOS agent chat under /calendar-extractor.
 
-Supported channels: iOS, Telegram, Discord, Slack
+Supported channels: iOS (default). For Telegram/Discord/Slack add `--channel <ch> --to "<channel-target-id>"`
+to a separate `openclaw cron add` — iOS delivery is the script's `/api/agent/push` call (no channel flag needed).
 
 ## Notes
 
-- Data stored in `data/users/<userId>.json`; external HTTP source configured separately via `HTTP_SOURCE_URL` env var.
-- Run `npm install` before first run (none needed beyond Node 18+ built-ins, but the `engines` field gates the runtime).
-- User IDs only allow letters, digits, `-`, `_` (path-traversal guard in `data.js`).
-- **Additional data sources picked but NOT auto-wired in `main()`**: `pure-local-state` and `user-typed-text`. The template only emits code for the first 2 sources (transcripts + external-http). To activate the others, hand-edit `scripts/calendar-extractor.js`:
-  - For pure-local-state: `const userState = fs.existsSync(safeUserPath(userId)) ? readJson(safeUserPath(userId)) : {};`
-  - For user-typed-text: `const text = process.argv.slice(3).join(' ');`
-- **TZ caveat**: cron tz is hardcoded to `America/Los_Angeles` at registration time. If you travel, re-register with the new tz: `node scripts/push-toggle.js off <userId>`, then `node scripts/push-toggle.js on <userId> --tz <new-tz>`, then re-run the `openclaw cron add` command above with the new `--tz`.
-- **Multi-channel cron**: each non-iOS channel (Telegram, Discord, Slack) needs a SEPARATE `openclaw cron add` with its own `--channel` and `--to <channel-target-id>`. iOS push is automatic via the `/api/agent/push` call (no separate cron needed for iOS).
-- **Session-finalize trigger (NOT implemented)**: the "fire on each finished recording" requirement is out-of-scope for skill-creator's periodic-push template. It requires server-side wiring: javis-server watches `audio_recordings.session_completed` flips and POSTs a synthetic prompt to the user's openclaw container `/v1/responses` to invoke this script with the finalized session id. Track as a follow-up in javis-server.
+- **No external dependencies** — Node 18+ built-ins only (`fetch`, `fs`, `path`). No `npm install`.
+- **Data sources**: recording transcripts (via `GET /api/transcripts/recent`, gateway-token authed) +
+  per-user local state (dedup memory). There is no `HTTP_SOURCE_URL` — the script talks to javis-server directly.
+- **Dedup is local-state-authoritative.** The container's gateway token can WRITE to
+  `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk JWT), so novelty is
+  decided by the local `seen` map; the server write is a best-effort mirror for the iOS app.
+- **Markdown, not native cards.** A cron push delivers a `content` string rendered as markdown on iOS
+  (`MDBlock`). Native `EventList`/`EventCard` blocks are emitted only during a live SSE agent turn
+  (`_maybe_emit_chat_block`), not via the push path — so the digest is rich markdown by design.
+- **User IDs** only allow letters, digits, `-`, `_` (path-traversal guard in `data.js`).
+- **TZ caveat**: the cron tz is fixed at registration. If you travel, re-register:
+  `node scripts/push-toggle.js off <userId>`, then `on <userId> --tz <new-tz>`, then re-run `openclaw cron add` with the new `--tz`.
+- **Backgrounded/killed iOS app**: `AGENT_PUSH` is WebSocket-only (no APNs). For mission-critical
+  delivery, add a Telegram channel as backup via a separate cron.
+- **Out of scope — per-session trigger**: "fire on each finished recording" needs server-side wiring
+  (javis-server watching `audio_recordings.session_completed`); the container is cron-driven only. Stays a follow-up.

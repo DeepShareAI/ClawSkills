@@ -1,12 +1,13 @@
 {
   "name": "calendar-extractor",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Periodically scan recent recording sessions, extract calendar events from transcripts, and push a daily summary to your iOS chat. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.",
   "keywords": ["today's meetings", "calendar extract", "今日会议", "提取日历"],
   "license": "MIT",
   "scripts": {
     "register": "node scripts/register.js",
-    "run": "node scripts/calendar-extractor.js",
+    "fetch": "node scripts/calendar-extractor.js",
+    "push": "node scripts/calendar-extractor.js",
     "push-on": "node scripts/push-toggle.js on",
     "push-off": "node scripts/push-toggle.js off",
     "push-status": "node scripts/push-toggle.js status"

@@ -53,9 +53,16 @@ reads the fetched transcripts and emits a JSON array of events.
 
 1. **Fetch** — `node scripts/calendar-extractor.js <userId> fetch` issues
    `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
-   `OPENCLAW_GATEWAY_TOKEN` bearer and prints `{ "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
+   `OPENCLAW_GATEWAY_TOKEN` bearer and prints
+   `{ "reference_time": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
    `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id) }`.
+   **Date resolution (required):** resolve every relative reference ("today", "tomorrow",
+   "Saturday", "next Thursday", "noon", "around 6/7/8") against the top-level `reference_time`
+   in `tz` — falling back to the session's `started_at` if `reference_time` is absent. Never use
+   your own sense of "today". Infer AM/PM from surrounding context (e.g. "show starts at 8pm" →
+   evening; "before Gaza's party at 6pm" → 18:00). If a date or time genuinely cannot be resolved,
+   emit `null` for that field rather than guessing.
 3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
    - best-effort mirrors all events to `POST /api/skill/data` (upsert by `dedup_key`) for the iOS app to read,
@@ -82,7 +89,7 @@ openclaw cron add \
   --cron "0 8,18 * * *" \
   --tz "America/Los_Angeles" \
   --session isolated \
-  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref). Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
+  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON, with a top-level reference_time + tz anchor). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref). Resolve all relative dates/times against reference_time in its tz (fallback: session started_at), infer AM/PM from context, and use null when unresolvable. Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
 ```
 
 ### Step 3: Confirm to user

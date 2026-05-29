@@ -104,8 +104,13 @@ async function doFetch() {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) throw new Error(`GET /api/transcripts/recent -> HTTP ${res.status}`);
   const data = await res.json();
-  // Emit exactly what the agent needs to extract events from.
-  console.log(JSON.stringify(data, null, 2));
+  // Anchor for relative-date resolution: the agent MUST resolve "tomorrow/Saturday/
+  // next Thursday/around 6,7,8" against reference_time (real now) in tz — never its own
+  // notion of "today". Preserve the server payload (sessions[]) alongside the anchor.
+  const out = (data && typeof data === 'object' && !Array.isArray(data))
+    ? { reference_time: new Date().toISOString(), tz: getTz(), ...data }
+    : { reference_time: new Date().toISOString(), tz: getTz(), sessions: data };
+  console.log(JSON.stringify(out, null, 2));
 }
 
 // ---- push helpers --------------------------------------------------------

@@ -53,8 +53,11 @@ if (cmd === 'on') {
   savePrefs({ time, channel, tz, enabledAt: new Date().toISOString() });
 
   const agentCmd =
-    `Run /${SLUG}. Step 1: node scripts/${SLUG}.js ${userId} fetch (recent transcripts as JSON). ` +
+    `Run /${SLUG}. Step 1: node scripts/${SLUG}.js ${userId} fetch (recent transcripts as JSON, ` +
+    `with a top-level reference_time + tz anchor). ` +
     `Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees). ` +
+    `Resolve all relative dates/times against reference_time in its tz (fallback: session started_at), ` +
+    `infer AM/PM from context, and use null when unresolvable. ` +
     `Step 3: pipe that array into node scripts/${SLUG}.js ${userId} push — it dedups and delivers a markdown digest to iOS.`;
 
   const channelFlags = channel && channel !== 'iOS'

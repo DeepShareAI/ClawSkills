@@ -1,6 +1,6 @@
 {
   "name": "calendar-extractor",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Periodically scan recent recording sessions, extract calendar events from transcripts, and push a daily summary to your iOS chat. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.",
   "keywords": ["today's meetings", "calendar extract", "今日会议", "提取日历"],
   "license": "MIT",

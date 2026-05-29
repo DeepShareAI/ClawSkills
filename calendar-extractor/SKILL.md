@@ -21,20 +21,28 @@ metadata:
 
 ## Core commands
 
-```bash
-# Register (first use)
-node scripts/register.js <userId> <name>
+> **`<userId>` is optional.** Omit it and it defaults to `self`. Each HiJavis user
+> runs in their own openclaw container, so `self` is correctly isolated; the gateway
+> token (not the userId) authenticates every server call. No registration is needed
+> to start — pass an explicit ID only if you run multiple profiles in one container.
 
+```bash
 # Step 1 — fetch recent transcripts as JSON (the agent extracts events from this)
-node scripts/calendar-extractor.js <userId> fetch [--hours N] [--limit N]
+node scripts/calendar-extractor.js fetch [--hours N] [--limit N]
 
 # Step 2 — push: pipe the extracted-events JSON array to stdin; dedups + delivers to iOS
-echo '<events-json-array>' | node scripts/calendar-extractor.js <userId> push
+echo '<events-json-array>' | node scripts/calendar-extractor.js push
 
 # Push management
-node scripts/push-toggle.js on <userId> [--time HH:MM] [--tz IANA] [--channel iOS|Telegram|Discord|Slack]
-node scripts/push-toggle.js off <userId>
-node scripts/push-toggle.js status <userId>
+node scripts/push-toggle.js on [--time HH:MM] [--tz IANA] [--channel iOS|Telegram|Discord|Slack]
+node scripts/push-toggle.js off
+node scripts/push-toggle.js status
+
+# Optional: explicit userId / multi-profile (back-compat — prepend the ID)
+node scripts/register.js <userId> <name>
+node scripts/calendar-extractor.js <userId> fetch
+echo '<events-json-array>' | node scripts/calendar-extractor.js <userId> push
+node scripts/push-toggle.js on <userId> [--time HH:MM] [--tz IANA]
 ```
 
 ## Workflow

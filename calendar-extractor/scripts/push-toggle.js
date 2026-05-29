@@ -16,11 +16,11 @@
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { sanitizeId, safeUserPath, readJson, writeJson } = require('./data');
+const { resolveUserId, safeUserPath, readJson, writeJson } = require('./data');
 
 const SLUG = 'calendar-extractor';
 const cmd = process.argv[2];
-const userId = sanitizeId(process.argv[3]);
+const userId = resolveUserId(process.argv[3]);
 const args = process.argv.slice(4);
 
 function getFlag(name, defaultVal) {

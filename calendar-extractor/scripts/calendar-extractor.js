@@ -29,7 +29,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { sanitizeId, safeUserPath, readJson, writeJson } = require('./data');
+const { resolveUserId, safeUserPath, readJson, writeJson } = require('./data');
 
 const SLUG = 'calendar-extractor';
 const SERVER = process.env.JAVIS_SERVER_URL || 'http://javis-server:8000';
@@ -47,9 +47,22 @@ if (process.argv.includes('--help')) {
   process.exit(0);
 }
 
-const userId = sanitizeId(process.argv[2]);
-const subcommand = process.argv[3] || 'fetch';
-const rest = process.argv.slice(4);
+// userId is optional. Positional parsing must not mistake a bare subcommand
+// (e.g. `calendar-extractor.js fetch`) for the userId.
+const SUBCOMMANDS = ['fetch', 'push'];
+const a2 = process.argv[2];
+let userId, subcommand, rest;
+if (SUBCOMMANDS.includes(a2)) {
+  // userId omitted — argv[2] is the subcommand (zero-config interactive use)
+  userId = resolveUserId(null);
+  subcommand = a2;
+  rest = process.argv.slice(3);
+} else {
+  // explicit userId provided (back-compat, e.g. cron-issued commands)
+  userId = resolveUserId(a2);
+  subcommand = process.argv[3] || 'fetch';
+  rest = process.argv.slice(4);
+}
 
 function getFlag(name, dflt) {
   const i = rest.indexOf(`--${name}`);

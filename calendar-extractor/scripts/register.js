@@ -6,14 +6,14 @@
 'use strict';
 
 const fs = require('fs');
-const { sanitizeId, safeUserPath, writeJson } = require('./data');
+const { resolveUserId, safeUserPath, writeJson } = require('./data');
 
 if (process.argv.includes('--help')) {
   console.log('Usage: node register.js <userId> <name>');
   process.exit(0);
 }
 
-const userId = sanitizeId(process.argv[2]);
+const userId = resolveUserId(process.argv[2]);
 const name = process.argv[3] || '';
 
 const profile = {

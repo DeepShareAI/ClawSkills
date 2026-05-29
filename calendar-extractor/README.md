@@ -1,5 +1,8 @@
 # Calendar Extractor
 
+> ⚠️ **Requires the HiJavis iPhone app.** This skill runs inside HiJavis — install the app first, then it's ready to use.
+> 📲 https://apps.apple.com/us/app/hijavis/id6745134765
+
 Calendar Extractor finds the plans hiding in your conversations. HiJavis listens, spots anything that sounds like a meeting or appointment, and hands you a tidy list right in your chat.
 
 ## Picture this

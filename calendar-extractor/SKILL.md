@@ -56,7 +56,8 @@ reads the fetched transcripts and emits a JSON array of events.
    `OPENCLAW_GATEWAY_TOKEN` bearer and prints
    `{ "reference_time": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
-   `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id) }`.
+   `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id), "source_kind" ("audio"|"keyboard", from the session's source) }`.
+   Carry `source_kind` through so provenance flows to the `/api/skill/data` mirror and the iOS digest.
    **Date resolution (required):** resolve every relative reference ("today", "tomorrow",
    "Saturday", "next Thursday", "noon", "around 6/7/8") against the top-level `reference_time`
    in `tz` — falling back to the session's `started_at` if `reference_time` is absent. Never use
@@ -89,7 +90,7 @@ openclaw cron add \
   --cron "0 8,18 * * *" \
   --tz "America/Los_Angeles" \
   --session isolated \
-  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON, with a top-level reference_time + tz anchor). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref). Resolve all relative dates/times against reference_time in its tz (fallback: session started_at), infer AM/PM from context, and use null when unresolvable. Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
+  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON, with a top-level reference_time + tz anchor). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref, source_kind audio|keyboard from the session's source). Resolve all relative dates/times against reference_time in its tz (fallback: session started_at), infer AM/PM from context, and use null when unresolvable. Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
 ```
 
 ### Step 3: Confirm to user
@@ -101,8 +102,10 @@ to a separate `openclaw cron add` — iOS delivery is the script's `/api/agent/p
 ## Notes
 
 - **No external dependencies** — Node 18+ built-ins only (`fetch`, `fs`, `path`). No `npm install`.
-- **Data sources**: recording transcripts (via `GET /api/transcripts/recent`, gateway-token authed) +
-  per-user local state (dedup memory). There is no `HTTP_SOURCE_URL` — the script talks to javis-server directly.
+- **Data sources**: audio recording transcripts **and** keyboard-dictation sessions — both via
+  `GET /api/transcripts/recent` (gateway-token authed), each session carrying a `source` field
+  (`"audio"` | `"keyboard"`) — plus per-user local state (dedup memory). There is no
+  `HTTP_SOURCE_URL` — the script talks to javis-server directly.
 - **Dedup is local-state-authoritative.** The container's gateway token can WRITE to
   `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk JWT), so novelty is
   decided by the local `seen` map; the server write is a best-effort mirror for the iOS app.

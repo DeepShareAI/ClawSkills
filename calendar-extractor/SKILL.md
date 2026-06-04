@@ -30,8 +30,15 @@ metadata:
 # Step 1 — fetch recent transcripts as JSON (the agent extracts events from this)
 node scripts/calendar-extractor.js fetch [--hours N] [--limit N]
 
+# Step 1 (auto / webhook) — fetch ONE completed unit, filtered from the window
+node scripts/calendar-extractor.js fetch --session <sessionId> [--hours N]   # audio unit
+node scripts/calendar-extractor.js fetch --kbd-input <inputId> [--hours N]   # keyboard unit
+
 # Step 2 — push: pipe the extracted-events JSON array to stdin; dedups + delivers to iOS
 echo '<events-json-array>' | node scripts/calendar-extractor.js push
+
+# Step 2 (auto / webhook) — extract ONE unit at most once (idempotent)
+echo '<events-json-array>' | node scripts/calendar-extractor.js push --unit <unitKey>
 
 # Push management
 node scripts/push-toggle.js on [--time HH:MM] [--tz IANA] [--channel iOS|Telegram|Discord|Slack]
@@ -69,6 +76,42 @@ reads the fetched transcripts and emits a JSON array of events.
    - best-effort mirrors all events to `POST /api/skill/data` (upsert by `dedup_key`) for the iOS app to read,
    - formats the **new** events as a markdown digest and delivers it via
      `POST http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<markdown>"}`.
+
+## Per-unit auto trigger (webhook)
+
+javis-server fires an openclaw **webhook** the moment a unit of input completes — an
+audio session ends or a keyboard input is saved — so extraction runs without waiting for
+the cron. javis-server `POST`s `http://<container>:18789/hooks/agent` (Bearer = the
+container's `gateway_token`) with a message asking the agent to run this skill for the
+just-finished unit. The webhook endpoint is exposed by the container's openclaw config
+`hooks` block (`{ "enabled": true, "token": "<gateway_token>", "path": "/hooks" }`),
+which javis-server now emits per user. No new container code is needed.
+
+A **unit** is `audio:<session_id>` (audio) or `kbd:<keyboard_input_id>` (keyboard).
+Each unit is extracted **at most once** — the flag lives in `extractedUnits` (below).
+The keyboard unit id is the **same** keyboard_input.id across all three sites — the
+webhook (`kbd:<id>`), `fetch --kbd-input <id>`, and `unitKeyFor` (from each event's
+`source_ref`) — so the auto and manual paths recognize each other's flags. `fetch
+--kbd-input <id>` resolves that single row via the dedicated endpoint
+`GET /api/transcripts/keyboard-input/<id>` (gateway-token authed; returns the row as a
+one-entry payload with `source="keyboard"`, `session_id=str(input id)`). The aggregated
+`/api/transcripts/recent` keys keyboard entries by daily session_id and carries no
+per-row id, so it serves only the audio `--session` filter and the manual time-window
+path.
+
+- **Auto path (one unit).** The agent runs `fetch --session <id>` / `fetch --kbd-input <id>`
+  to pull just that unit, extracts events, then `push --unit <unitKey>`. `push --unit`:
+  - if the unit is already in `extractedUnits` → no-op (`already extracted: <unit>`, idempotent);
+  - else if extraction yielded **zero** events → the unit is left **unflagged** (the fetch
+    may have raced the DB), so the next manual ask can back-fill it; nothing is written or pushed;
+  - else mirror to `/api/skill/data`, push the digest to iOS, and record
+    `extractedUnits[<unitKey>] = { ts, events }` (flag + cache).
+- **Manual path (no `--unit`).** When the user asks again ("today's meetings"), `push`
+  with **no** `--unit` fills gaps: already-flagged units are re-displayed from their
+  cached events (no table re-write); not-yet-flagged units are extracted, written, pushed,
+  flagged, and cached. One combined digest; only fresh units touch the table.
+- **Container down at completion** → the webhook fails silently and the unit stays
+  unflagged; the next manual ask back-fills it. No loss.
 
 ## Push setup (cron registration)
 
@@ -108,7 +151,15 @@ to a separate `openclaw cron add` — iOS delivery is the script's `/api/agent/p
   `HTTP_SOURCE_URL` — the script talks to javis-server directly.
 - **Dedup is local-state-authoritative.** The container's gateway token can WRITE to
   `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk JWT), so novelty is
-  decided by the local `seen` map; the server write is a best-effort mirror for the iOS app.
+  decided by local state; the server write is a best-effort mirror for the iOS app.
+- **Two local maps in `data/users/<userId>.json`** (both 30-day TTL-pruned):
+  - `seen` — event-level dedup (`{ "<event-key>": "<ts>" }`). Backstop so a duplicate
+    event never re-reaches the table/chat even if a unit flag is lost.
+  - `extractedUnits` — per-unit flag **and** event cache
+    (`{ "audio:<sid>" | "kbd:<id>": { "ts", "events": [...] } }`). The primary
+    "don't-extract-twice" record. Caching each unit's extracted events lets a manual ask
+    re-display flagged units from the cache (no LLM re-run, no table re-write) — the
+    container cannot read the calendar table back, so the cache is the only source.
 - **Markdown, not native cards.** A cron push delivers a `content` string rendered as markdown on iOS
   (`MDBlock`). Native `EventList`/`EventCard` blocks are emitted only during a live SSE agent turn
   (`_maybe_emit_chat_block`), not via the push path — so the digest is rich markdown by design.
@@ -117,5 +168,3 @@ to a separate `openclaw cron add` — iOS delivery is the script's `/api/agent/p
   `node scripts/push-toggle.js off <userId>`, then `on <userId> --tz <new-tz>`, then re-run `openclaw cron add` with the new `--tz`.
 - **Backgrounded/killed iOS app**: `AGENT_PUSH` is WebSocket-only (no APNs). For mission-critical
   delivery, add a Telegram channel as backup via a separate cron.
-- **Out of scope — per-session trigger**: "fire on each finished recording" needs server-side wiring
-  (javis-server watching `audio_recordings.session_completed`); the container is cron-driven only. Stays a follow-up.

@@ -42,6 +42,7 @@ Want it to come to you? Ask HiJavis to send a summary on a schedule. By default 
 ## What makes it handy
 
 - **It gets how you talk about time.** You don't say "March 14th at 2:00 PM" out loud. You say "tomorrow," "next Thursday," "around 6," "noon." Calendar Extractor turns all of that into a real date and time in your time zone.
+- **It's instant.** The moment a recording or a typed note finishes, it pulls out any plans right then, so your list is ready before you even ask.
 - **It never repeats itself.** It remembers what it already showed you, so the same event won't clutter your list twice.
 - **It works in English and Chinese.** It keeps up smoothly with both.
 

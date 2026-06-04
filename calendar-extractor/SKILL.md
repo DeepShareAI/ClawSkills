@@ -91,11 +91,13 @@ A **unit** is `audio:<session_id>` (audio) or `kbd:<keyboard_input_id>` (keyboar
 Each unit is extracted **at most once** — the flag lives in `extractedUnits` (below).
 The keyboard unit id is the **same** keyboard_input.id across all three sites — the
 webhook (`kbd:<id>`), `fetch --kbd-input <id>`, and `unitKeyFor` (from each event's
-`source_ref`) — so the auto and manual paths recognize each other's flags. For the
-keyboard auto fetch to resolve a row, `/api/transcripts/recent` must surface keyboard
-entries keyed by keyboard_input.id (`source="keyboard"`, `session_id=str(input id)`);
-until that server-side per-input emission lands, the keyboard webhook fetches nothing and
-the unit defers to the manual gap-fill path.
+`source_ref`) — so the auto and manual paths recognize each other's flags. `fetch
+--kbd-input <id>` resolves that single row via the dedicated endpoint
+`GET /api/transcripts/keyboard-input/<id>` (gateway-token authed; returns the row as a
+one-entry payload with `source="keyboard"`, `session_id=str(input id)`). The aggregated
+`/api/transcripts/recent` keys keyboard entries by daily session_id and carries no
+per-row id, so it serves only the audio `--session` filter and the manual time-window
+path.
 
 - **Auto path (one unit).** The agent runs `fetch --session <id>` / `fetch --kbd-input <id>`
   to pull just that unit, extracts events, then `push --unit <unitKey>`. `push --unit`:

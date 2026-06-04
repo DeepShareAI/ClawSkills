@@ -30,6 +30,7 @@
  *
  * Verified endpoints (javis-server):
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
+ *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/agent/push          (get_gateway_user; {skill, content, session_id?})
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key)
  */
@@ -145,23 +146,21 @@ function sessionId(s) {
 // keyboard_input.id the webhook fired for.
 //
 // Unit identity (locked by the spec): a keyboard unit is `kbd:<keyboard_input.id>`
-// — the same id the webhook sends, the id `--kbd-input` filters on, and the id
+// — the same id the webhook sends, the id `--kbd-input` resolves, and the id
 // `unitKeyFor` derives from each event's source_ref. All three agree, so a unit
 // the auto path flags is recognized by the manual path (cross-path idempotency).
 //
-// NOTE: for `--kbd-input` to actually resolve a row, /api/transcripts/recent must
-// surface keyboard entries keyed by keyboard_input.id (source="keyboard",
-// session_id=str(input id)). That server-side per-input emission is the one
-// remaining dependency; until it lands the keyboard auto path fetches nothing and
-// the unit stays unflagged for the manual gap-fill path to back-fill.
+// `--kbd-input` resolves a single row via the dedicated server endpoint
+// GET /api/transcripts/keyboard-input/<id> (which returns that row as a one-entry
+// payload with session_id=str(input id), source="keyboard"); `/api/transcripts/recent`
+// aggregates keyboard rows by daily session_id and carries no per-row id, so it can
+// only serve the audio `--session` filter and the manual time-window path.
 //
-// Returns the filtered sessions array; with no filter the input is unchanged.
-function filterToUnit(sessions, { sessionFilter, kbdFilter }) {
+// Returns the filtered sessions array; `--session` (audio) keeps the one non-keyboard
+// session whose session_id matches. With no filter the input is unchanged.
+function filterToUnit(sessions, { sessionFilter }) {
   if (sessionFilter) {
     return sessions.filter((s) => sessionSource(s) !== 'keyboard' && sessionId(s) === sessionFilter);
-  }
-  if (kbdFilter) {
-    return sessions.filter((s) => sessionSource(s) === 'keyboard' && sessionId(s) === kbdFilter);
   }
   return sessions;
 }
@@ -181,8 +180,13 @@ async function doFetch(opts = {}, deps = {}) {
   const kbdFilter = 'kbdFilter' in opts ? opts.kbdFilter : getFlag('kbd-input', null);
   const hours = 'hours' in opts ? opts.hours : (parseInt(getFlag('hours', '24'), 10) || 24);
   const limit = 'limit' in opts ? opts.limit : (parseInt(getFlag('limit', '50'), 10) || 50);
-  const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
-  const url = `${SERVER}/api/transcripts/recent?since=${encodeURIComponent(since)}&limit=${limit}`;
+
+  // --kbd-input resolves one keyboard row via the dedicated per-input endpoint
+  // (the aggregated /transcripts/recent carries no keyboard_input.id). It already
+  // returns exactly that unit, so no client-side filter is applied.
+  const url = kbdFilter
+    ? `${SERVER}/api/transcripts/keyboard-input/${encodeURIComponent(kbdFilter)}`
+    : `${SERVER}/api/transcripts/recent?since=${encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString())}&limit=${limit}`;
   const data = await httpGet(url, token);
 
   // Normalize to a sessions array regardless of the server envelope shape.
@@ -191,7 +195,8 @@ async function doFetch(opts = {}, deps = {}) {
     ? (Array.isArray(data.sessions) ? data.sessions : [])
     : (Array.isArray(data) ? data : []);
 
-  sessions = filterToUnit(sessions, { sessionFilter, kbdFilter });
+  // --session (audio) filters the recent window; --kbd-input is already one unit.
+  if (!kbdFilter) sessions = filterToUnit(sessions, { sessionFilter });
 
   // Anchor for relative-date resolution: the agent MUST resolve "tomorrow/Saturday/
   // next Thursday/around 6,7,8" against reference_time (real now) in tz — never its own
@@ -205,7 +210,7 @@ async function doFetch(opts = {}, deps = {}) {
 
 async function defaultHttpGet(url, token) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`GET /api/transcripts/recent -> HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`GET ${url.replace(SERVER, '')} -> HTTP ${res.status}`);
   return res.json();
 }
 

@@ -61,22 +61,24 @@ test('doFetch --session keeps only the matching audio session, drops keyboard ro
   assert.equal(emitted.tz, TZ);
 });
 
-test('doFetch --kbd-input keeps only the matching keyboard row (per keyboard_input.id)', async () => {
-  // The server emits keyboard units keyed by keyboard_input.id (session_id is
-  // str(input id)). A realistic recent payload aggregates audio by session_id
-  // and keyboard per input row; --kbd-input must resolve exactly one row.
+test('doFetch --kbd-input resolves one row via the dedicated keyboard-input endpoint', async () => {
+  // A keyboard unit is kbd:<keyboard_input.id>. The aggregated /transcripts/recent
+  // carries no per-row id, so --kbd-input hits GET /api/transcripts/keyboard-input/<id>,
+  // which returns exactly that row as a one-entry payload (session_id=str(input id)).
+  let calledUrl;
   const payload = {
     sessions: [
-      { session_id: 'daily-sess-abc', source: 'keyboard', transcript: 'aggregate (wrong)' },
-      { session_id: '4217', source: 'keyboard', transcript: 'targeted input' },
-      { session_id: '4217', source: 'audio', transcript: 'audio collision' },
+      { session_id: '4217', source: 'keyboard', started_at: 1, ended_at: 1, transcript: 'targeted input' },
     ],
   };
   let emitted;
   await doFetch(
     { token: 't', sessionFilter: null, kbdFilter: '4217', hours: 24, limit: 50 },
-    { httpGet: async () => payload, tz: TZ, now: NOW, emit: (o) => { emitted = o; } }
+    { httpGet: async (url) => { calledUrl = url; return payload; }, tz: TZ, now: NOW, emit: (o) => { emitted = o; } }
   );
+  // Must target the per-input endpoint, NOT the aggregated recent endpoint.
+  assert.match(calledUrl, /\/api\/transcripts\/keyboard-input\/4217$/);
+  assert.doesNotMatch(calledUrl, /transcripts\/recent/);
   assert.equal(emitted.sessions.length, 1);
   assert.equal(emitted.sessions[0].session_id, '4217');
   assert.equal(emitted.sessions[0].source, 'keyboard');

@@ -57,7 +57,9 @@ test('doFetch --session keeps only the matching audio session, drops keyboard ro
   assert.equal(emitted.sessions.length, 1);
   assert.equal(emitted.sessions[0].session_id, 'aud-1');
   assert.equal(emitted.sessions[0].source, 'audio');
-  assert.equal(emitted.reference_time, NOW());
+  // reference_time is now local wall-clock in tz; the raw instant lives on _utc.
+  assert.equal(emitted.reference_time_utc, NOW());
+  assert.equal(emitted.reference_time, '2026-06-03T05:00:00'); // 12:00Z -> 05:00 PDT
   assert.equal(emitted.tz, TZ);
 });
 
@@ -83,6 +85,29 @@ test('doFetch --kbd-input resolves one row via the dedicated keyboard-input endp
   assert.equal(emitted.sessions[0].session_id, '4217');
   assert.equal(emitted.sessions[0].source, 'keyboard');
   assert.equal(emitted.sessions[0].transcript, 'targeted input');
+});
+
+// ---- fetch: anchor is LOCAL wall-clock, not a UTC instant ----------------
+// Regression: at 9:11 PM PDT on Jun 4, the UTC instant is already Jun 5
+// (2026-06-05T04:11Z). Handing the LLM that Z instant makes it resolve "today"
+// to Jun 5 — every event lands a day late (table showed Fri Jun 5 for a Thu
+// Jun 4 meeting). The anchor must carry the LOCAL date so "today" == Jun 4.
+test('doFetch emits a local wall-clock anchor whose date is the tz-local "today"', async () => {
+  // 9:11 PM PDT on Thu Jun 4, 2026 — the UTC instant has rolled to Jun 5.
+  const eveningUtc = () => '2026-06-05T04:11:00.000Z';
+  let emitted;
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: null, hours: 24, limit: 50 },
+    { httpGet: async () => ({ sessions: [] }), tz: TZ, now: eveningUtc, emit: (o) => { emitted = o; } }
+  );
+  // "today" for the LLM must be the LOCAL date, not the UTC date.
+  assert.equal(emitted.reference_date, '2026-06-04', 'today is the tz-local date');
+  assert.equal(emitted.reference_time, '2026-06-04T21:11:00', 'anchor is local wall-clock, no Z');
+  assert.doesNotMatch(emitted.reference_time, /Z$/, 'anchor must not be a UTC Z instant');
+  assert.equal(emitted.reference_weekday, 'Thursday', 'weekday anchors "Saturday"/"next Thursday"');
+  // The true instant is preserved for transparency/debugging.
+  assert.equal(emitted.reference_time_utc, eveningUtc());
+  assert.equal(emitted.tz, TZ);
 });
 
 test('doFetch with no filter returns the whole window unchanged (manual path)', async () => {

@@ -69,6 +69,27 @@ function toNaiveLocal(iso, tz) {
   return `${year}-${month}-${day}T${hour}:${p.minute}:${p.second}`;
 }
 
+// Build the relative-date anchor handed to the LLM. The instant `iso` is the
+// real now; what the LLM needs is the LOCAL wall-clock in `tz`, because a UTC
+// `Z` instant's date can already be the NEXT day in the evening west of UTC
+// (9:11 PM PDT on Jun 4 == 2026-06-05T04:11Z). Anchoring "today" on that Z
+// string makes the model resolve every event one day late. So we hand it the
+// zoneless local wall-clock plus the explicit local date and weekday, and keep
+// the raw instant under reference_time_utc for transparency.
+function localAnchor(iso, tz) {
+  const local = toNaiveLocal(iso, tz); // "2026-06-04T21:11:00" — no zone
+  const d = new Date(iso);
+  const weekday = isNaN(d.getTime())
+    ? null
+    : new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(d);
+  return {
+    reference_time: local,                       // local wall-clock; the LLM's "now"
+    reference_date: local ? local.slice(0, 10) : null, // "today" == this date in tz
+    reference_weekday: weekday,                   // anchors "Saturday"/"next Thursday"
+    reference_time_utc: iso,                       // the true instant, for reference
+  };
+}
+
 // Build the POST /api/skill/data items array. dedup_key stays instant-based
 // (stable identity, unchanged by this fix); start_at/end_at are naive-local so
 // the iOS calendar table renders the same local time as the push digest.
@@ -155,6 +176,7 @@ module.exports = {
   normalizeEvent,
   dedupKey,
   toNaiveLocal,
+  localAnchor,
   buildSkillDataItems,
   unitKeyFor,
   pruneByTtl,

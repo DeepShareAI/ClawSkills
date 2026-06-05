@@ -61,16 +61,21 @@ reads the fetched transcripts and emits a JSON array of events.
 1. **Fetch** — `node scripts/calendar-extractor.js <userId> fetch` issues
    `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
    `OPENCLAW_GATEWAY_TOKEN` bearer and prints
-   `{ "reference_time": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
+   `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`.
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
    `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id), "source_kind" ("audio"|"keyboard", from the session's source) }`.
    Carry `source_kind` through so provenance flows to the `/api/skill/data` mirror and the iOS digest.
-   **Date resolution (required):** resolve every relative reference ("today", "tomorrow",
-   "Saturday", "next Thursday", "noon", "around 6/7/8") against the top-level `reference_time`
-   in `tz` — falling back to the session's `started_at` if `reference_time` is absent. Never use
-   your own sense of "today". Infer AM/PM from surrounding context (e.g. "show starts at 8pm" →
-   evening; "before Gaza's party at 6pm" → 18:00). If a date or time genuinely cannot be resolved,
-   emit `null` for that field rather than guessing.
+   **Date resolution (required):** the top-level `reference_time` is **already local
+   wall-clock in `tz`** (zoneless) and `reference_date`/`reference_weekday` give the local
+   "today" — so "today" == `reference_date`, and "tomorrow"/"Saturday"/"next Thursday" count
+   forward from `reference_weekday`. Do **not** re-apply the tz offset and do **not** anchor on
+   `reference_time_utc` (the raw instant, whose date can be the *next* day in the evening — that
+   is exactly the off-by-one this field avoids). Fall back to the session's `started_at` only if
+   `reference_time` is absent. Never use your own sense of "today". Emit each event's `start_at`/
+   `end_at` as a full ISO 8601 instant **with the explicit `tz` UTC offset** (e.g. an 8 PM event
+   in `America/Los_Angeles` → `2026-06-04T20:00:00-07:00`) — not a zoneless string, which the
+   pipeline would misparse in the container's system zone. Infer AM/PM from surrounding context (e.g. "show starts at 8pm" → evening; "before Gaza's
+   party at 6pm" → 18:00). If a date or time genuinely cannot be resolved, emit `null`.
 3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
    - best-effort mirrors all events to `POST /api/skill/data` (upsert by `dedup_key`) for the iOS app to read,
@@ -133,7 +138,7 @@ openclaw cron add \
   --cron "0 8,18 * * *" \
   --tz "America/Los_Angeles" \
   --session isolated \
-  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON, with a top-level reference_time + tz anchor). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601, location, attendees, source_ref, source_kind audio|keyboard from the session's source). Resolve all relative dates/times against reference_time in its tz (fallback: session started_at), infer AM/PM from context, and use null when unresolvable. Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
+  --message "Run /calendar-extractor. Step 1: node scripts/calendar-extractor.js <userId> fetch (recent transcripts as JSON, with a top-level reference_time/reference_date/reference_weekday + tz anchor). Step 2: extract calendar events as a JSON array (title, start_at, end_at ISO 8601 WITH the tz offset, location, attendees, source_ref, source_kind audio|keyboard from the session's source). reference_time is ALREADY local wall-clock in tz: today == reference_date, count weekdays from reference_weekday, do NOT re-apply the offset or anchor on reference_time_utc (fallback: session started_at). Infer AM/PM from context, use null when unresolvable. Step 3: pipe that array into node scripts/calendar-extractor.js <userId> push — it dedups and delivers a markdown digest to iOS."
 ```
 
 ### Step 3: Confirm to user

@@ -43,6 +43,7 @@ const {
   isoOrNull,
   normalizeEvent,
   dedupKey,
+  localAnchor,
   buildSkillDataItems,
   unitKeyFor,
   pruneSeen,
@@ -200,10 +201,13 @@ async function doFetch(opts = {}, deps = {}) {
   if (!kbdFilter) sessions = filterToUnit(sessions, { sessionFilter });
 
   // Anchor for relative-date resolution: the agent MUST resolve "tomorrow/Saturday/
-  // next Thursday/around 6,7,8" against reference_time (real now) in tz — never its own
-  // notion of "today". Preserve the server payload (sessions[]) alongside the anchor.
+  // next Thursday/around 6,7,8" against the anchor — never its own notion of "today".
+  // The anchor is LOCAL wall-clock in tz (not the raw UTC instant): a Z instant's
+  // date can already be the next day in the evening west of UTC, which made the LLM
+  // resolve "today" one day late. localAnchor() hands it reference_time (zoneless
+  // local), reference_date, reference_weekday, and reference_time_utc (true instant).
   const base = isEnvelope ? data : {};
-  const out = { reference_time: nowIso, tz, ...base, sessions };
+  const out = { ...localAnchor(nowIso, tz), tz, ...base, sessions };
   if (deps.emit) deps.emit(out);
   else console.log(JSON.stringify(out, null, 2));
   return out;

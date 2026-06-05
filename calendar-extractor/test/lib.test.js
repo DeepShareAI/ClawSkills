@@ -8,6 +8,8 @@ const {
   isoOrNull,
   normalizeEvent,
   dedupKey,
+  toNaiveLocal,
+  buildSkillDataItems,
   unitKeyFor,
   pruneSeen,
   pruneExtractedUnits,
@@ -89,6 +91,41 @@ test('dedupKey differs by day, title, and start time', () => {
   assert.notEqual(dedupKey(base), dedupKey(otherTitle));
   assert.notEqual(dedupKey(base), dedupKey(otherTime));
   assert.ok(dedupKey(noDate).startsWith('nodate|'));
+});
+
+// ---- toNaiveLocal / buildSkillDataItems (naive-local mirror) -------------
+test('toNaiveLocal renders the instant as naive wall-clock in tz (no Z)', () => {
+  // 04:00Z Jun 6 == 21:00 Jun 5 in Los Angeles (PDT, -7).
+  assert.equal(toNaiveLocal('2026-06-06T04:00:00.000Z', 'America/Los_Angeles'), '2026-06-05T21:00:00');
+  // Same instant in New York (EDT, -4) == 00:00 Jun 6.
+  assert.equal(toNaiveLocal('2026-06-06T04:00:00.000Z', 'America/New_York'), '2026-06-06T00:00:00');
+  // No Z / offset designator on the output.
+  assert.doesNotMatch(toNaiveLocal('2026-06-06T04:00:00.000Z', 'America/Los_Angeles'), /[Z+]/);
+  assert.equal(toNaiveLocal(null, 'America/Los_Angeles'), null);
+  assert.equal(toNaiveLocal('not-a-date', 'America/Los_Angeles'), null);
+});
+
+test('buildSkillDataItems emits naive-local start/end and instant-based dedup_key', () => {
+  const ev = normalizeEvent({
+    title: 'Meeting', start_at: '2026-06-06T04:00:00Z', end_at: '2026-06-06T04:30:00Z',
+    source_ref: '521', source_kind: 'keyboard',
+  });
+  const [item] = buildSkillDataItems([ev], 'America/Los_Angeles');
+  assert.equal(item.start_at, '2026-06-05T21:00:00');  // 9:00 PM local, not 04:00Z
+  assert.equal(item.end_at, '2026-06-05T21:30:00');
+  assert.doesNotMatch(item.start_at, /Z$/);
+  assert.equal(item.dedup_key, dedupKey(ev));          // dedup identity unchanged
+  assert.equal(item.source_ref, '521');
+  assert.deepEqual(item.payload, { title: 'Meeting', location: null, attendees: [], notes: null });
+});
+
+test('buildSkillDataItems preserves null start/end and tolerates empty input', () => {
+  const ev = normalizeEvent({ title: 'TBD' }); // no start_at
+  const [item] = buildSkillDataItems([ev], 'America/Los_Angeles');
+  assert.equal(item.start_at, null);
+  assert.equal(item.end_at, null);
+  assert.deepEqual(buildSkillDataItems(null, 'America/Los_Angeles'), []);
+  assert.deepEqual(buildSkillDataItems([], 'America/Los_Angeles'), []);
 });
 
 // ---- unitKeyFor ----------------------------------------------------------

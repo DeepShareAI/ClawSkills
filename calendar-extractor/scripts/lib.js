@@ -39,6 +39,49 @@ function dedupKey(ev) {
   return `${day}|${title}|${ev.startAt || ''}`.slice(0, 512);
 }
 
+// ---- naive-local wall-clock for skill_data -------------------------------
+// iOS (Sources/JavisApp/utils/ServerDate.swift) reads calendar start_at/end_at
+// as NAIVE LOCAL wall-clock in the device timezone — a zoneless string is
+// interpreted in TimeZone.current. So we must store the wall-clock of the
+// instant in `tz` WITHOUT a zone designator (no Z); a UTC `Z` instant would be
+// re-read as device-local and shift by the tz offset. Example:
+//   2026-06-06T04:00:00.000Z @ America/Los_Angeles -> "2026-06-05T21:00:00".
+function toNaiveLocal(iso, tz) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(d).reduce((o, x) => ((o[x.type] = x.value), o), {});
+  let { year, month, day, hour } = p;
+  // Node/V8 emits "00" at local midnight, but some ICU builds emit "24:00",
+  // meaning the END of this calendar day (= start of the next). Normalize to
+  // "00" AND roll the date forward a day, else the result is off by a full day.
+  if (hour === '24') {
+    hour = '00';
+    const next = new Date(Date.UTC(+year, +month - 1, +day) + 86400000);
+    year = String(next.getUTCFullYear()).padStart(4, '0');
+    month = String(next.getUTCMonth() + 1).padStart(2, '0');
+    day = String(next.getUTCDate()).padStart(2, '0');
+  }
+  return `${year}-${month}-${day}T${hour}:${p.minute}:${p.second}`;
+}
+
+// Build the POST /api/skill/data items array. dedup_key stays instant-based
+// (stable identity, unchanged by this fix); start_at/end_at are naive-local so
+// the iOS calendar table renders the same local time as the push digest.
+function buildSkillDataItems(events, tz) {
+  return (events || []).slice(0, 500).map((ev) => ({
+    dedup_key: dedupKey(ev),
+    payload: { title: ev.title, location: ev.location, attendees: ev.attendees, notes: ev.notes },
+    start_at: toNaiveLocal(ev.startAt, tz),
+    end_at: toNaiveLocal(ev.endAt, tz),
+    source_ref: ev.sourceRef,
+  }));
+}
+
 // ---- per-unit keying -----------------------------------------------------
 // A unit is "kbd:<source_ref>" for keyboard input, else "audio:<source_ref>".
 // source_kind carries through normalizeEvent (from the session's `source`).
@@ -111,6 +154,8 @@ module.exports = {
   isoOrNull,
   normalizeEvent,
   dedupKey,
+  toNaiveLocal,
+  buildSkillDataItems,
   unitKeyFor,
   pruneByTtl,
   pruneSeen,

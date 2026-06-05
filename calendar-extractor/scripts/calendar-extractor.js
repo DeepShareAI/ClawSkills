@@ -43,6 +43,7 @@ const {
   isoOrNull,
   normalizeEvent,
   dedupKey,
+  buildSkillDataItems,
   unitKeyFor,
   pruneSeen,
   pruneExtractedUnits,
@@ -242,18 +243,16 @@ async function pushToiOS(token, content) {
   if (!res.ok) throw new Error(`POST /api/agent/push -> HTTP ${res.status}`);
 }
 
-async function mirrorToSkillData(token, events) {
+async function mirrorToSkillData(token, events, tz) {
   // Best-effort server-side mirror so the iOS app can read events via Clerk auth.
   // The container's gateway token can WRITE here, but cannot read back
   // (GET /api/skill/data requires a Clerk JWT) — so local state is the dedup
   // source of truth and this mirror is non-fatal.
-  const items = events.slice(0, 500).map((ev) => ({
-    dedup_key: dedupKey(ev),
-    payload: { title: ev.title, location: ev.location, attendees: ev.attendees, notes: ev.notes },
-    start_at: ev.startAt,
-    end_at: ev.endAt,
-    source_ref: ev.sourceRef,
-  }));
+  //
+  // start_at/end_at MUST be naive LOCAL wall-clock in `tz`, not a UTC instant:
+  // iOS (Sources/JavisApp/utils/ServerDate.swift) reads calendar datetimes as
+  // zoneless local time, so a `Z` instant would shift by the tz offset.
+  const items = buildSkillDataItems(events, tz);
   const res = await fetch(`${SERVER}/api/skill/data`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -266,7 +265,7 @@ async function mirrorToSkillData(token, events) {
 // recording mock instead of the real javis-server client. Each method takes the
 // normalized events so a test can assert exactly which events hit the table.
 const defaultPushClient = {
-  mirror: (token, events) => mirrorToSkillData(token, events),
+  mirror: (token, events, tz) => mirrorToSkillData(token, events, tz),
   push: (token, content) => pushToiOS(token, content),
 };
 
@@ -327,7 +326,7 @@ async function doPushAuto(token, unitKey, deps = {}) {
     return;
   }
 
-  try { await client.mirror(token, events); }
+  try { await client.mirror(token, events, tz); }
   catch (e) { console.error('⚠️ skill_data mirror failed (non-fatal):', e.message); }
 
   const content = formatDigest(events, tz);
@@ -371,7 +370,7 @@ async function doPushManual(token, deps = {}) {
 
   // Only fresh units touch the calendar table.
   if (freshNew.length) {
-    try { await client.mirror(token, freshNew.map((f) => f.ev)); }
+    try { await client.mirror(token, freshNew.map((f) => f.ev), tz); }
     catch (e) { console.error('⚠️ skill_data mirror failed (non-fatal):', e.message); }
   }
 

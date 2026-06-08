@@ -3,7 +3,7 @@
  * calendar-extractor — pure logic library (no network, no stdin, no fs).
  *
  * Everything here is deterministic and unit-testable: event normalization,
- * dedup keys, TTL pruning, per-unit keying, and the manual-path partition.
+ * dedup keys, and TTL pruning.
  * The CLI (`calendar-extractor.js`) requires these and stays thin.
  */
 'use strict';
@@ -103,17 +103,6 @@ function buildSkillDataItems(events, tz) {
   }));
 }
 
-// ---- per-unit keying -----------------------------------------------------
-// A unit is "kbd:<source_ref>" for keyboard input, else "audio:<source_ref>".
-// source_kind carries through normalizeEvent (from the session's `source`).
-function unitKeyFor(event) {
-  if (!event || typeof event !== 'object') return null;
-  const ref = (event.sourceRef || '').toString().trim();
-  if (!ref) return null;
-  const kind = (event.sourceKind || '').toString().trim().toLowerCase();
-  return kind === 'keyboard' ? `kbd:${ref}` : `audio:${ref}`;
-}
-
 // ---- TTL pruning ---------------------------------------------------------
 // Generic pruner for any { key: <something-with-a-timestamp> } map. `tsOf`
 // extracts the ISO timestamp from each value; entries older than the 30-day
@@ -134,42 +123,6 @@ function pruneSeen(seen, ttlDays) {
   return pruneByTtl(seen, (iso) => iso, ttlDays);
 }
 
-// `extractedUnits` is a { unitKey: { ts, events } } map — ts lives on the value.
-function pruneExtractedUnits(units, ttlDays) {
-  return pruneByTtl(units, (u) => (u && u.ts), ttlDays);
-}
-
-// ---- manual-path partition -----------------------------------------------
-// Split incoming events by unit against the extractedUnits flag store:
-//   - flaggedUnits: units already extracted (display-only). Each carries the
-//     CACHED events from extractedUnits — not the freshly-fetched ones — so the
-//     digest re-shows exactly what was first written, without a table re-write.
-//   - freshEvents:  events whose unit is not yet flagged (gap-fill: extract +
-//     write + push + flag).
-// Events with no derivable unit key are treated as fresh.
-function partitionForManual(events, extractedUnits) {
-  const units = extractedUnits || {};
-  const flaggedKeys = [];
-  const seenFlagged = new Set();
-  const freshEvents = [];
-  for (const ev of events || []) {
-    const key = unitKeyFor(ev);
-    if (key && units[key]) {
-      if (!seenFlagged.has(key)) {
-        seenFlagged.add(key);
-        flaggedKeys.push(key);
-      }
-    } else {
-      freshEvents.push(ev);
-    }
-  }
-  const flaggedUnits = flaggedKeys.map((key) => ({
-    key,
-    events: Array.isArray(units[key].events) ? units[key].events : [],
-  }));
-  return { flaggedUnits, freshEvents };
-}
-
 module.exports = {
   SEEN_TTL_DAYS,
   isoOrNull,
@@ -178,9 +131,6 @@ module.exports = {
   toNaiveLocal,
   localAnchor,
   buildSkillDataItems,
-  unitKeyFor,
   pruneByTtl,
   pruneSeen,
-  pruneExtractedUnits,
-  partitionForManual,
 };

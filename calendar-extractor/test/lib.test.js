@@ -10,10 +10,7 @@ const {
   dedupKey,
   toNaiveLocal,
   buildSkillDataItems,
-  unitKeyFor,
   pruneSeen,
-  pruneExtractedUnits,
-  partitionForManual,
 } = require('../scripts/lib');
 
 // ---- isoOrNull -----------------------------------------------------------
@@ -128,20 +125,6 @@ test('buildSkillDataItems preserves null start/end and tolerates empty input', (
   assert.deepEqual(buildSkillDataItems([], 'America/Los_Angeles'), []);
 });
 
-// ---- unitKeyFor ----------------------------------------------------------
-test('unitKeyFor derives audio vs keyboard unit keys', () => {
-  assert.equal(unitKeyFor(normalizeEvent({ title: 'x', session_id: 's1', source: 'audio' })), 'audio:s1');
-  assert.equal(unitKeyFor(normalizeEvent({ title: 'x', session_id: 's1' })), 'audio:s1'); // default
-  assert.equal(unitKeyFor(normalizeEvent({ title: 'x', source_ref: 'k1', source_kind: 'keyboard' })), 'kbd:k1');
-  assert.equal(unitKeyFor(normalizeEvent({ title: 'x', source_ref: 'k1', source_kind: 'KEYBOARD' })), 'kbd:k1');
-});
-
-test('unitKeyFor returns null without a source ref', () => {
-  assert.equal(unitKeyFor(normalizeEvent({ title: 'x' })), null);
-  assert.equal(unitKeyFor(null), null);
-  assert.equal(unitKeyFor({}), null);
-});
-
 // ---- pruning by TTL ------------------------------------------------------
 test('pruneSeen drops entries older than TTL and unparseable ones', () => {
   const now = Date.now();
@@ -158,20 +141,6 @@ test('pruneSeen on empty / missing map yields {}', () => {
   assert.deepEqual(pruneSeen({}), {});
 });
 
-test('pruneExtractedUnits drops stale units, keeps fresh with payload', () => {
-  const now = Date.now();
-  const fresh = new Date(now - 2 * 86400 * 1000).toISOString();
-  const stale = new Date(now - (SEEN_TTL_DAYS + 5) * 86400 * 1000).toISOString();
-  const units = {
-    'audio:a': { ts: fresh, events: [{ title: 'x' }] },
-    'kbd:b': { ts: stale, events: [] },
-    'audio:c': { ts: undefined, events: [] }, // unparseable ts -> dropped
-  };
-  const out = pruneExtractedUnits(units);
-  assert.deepEqual(Object.keys(out), ['audio:a']);
-  assert.deepEqual(out['audio:a'].events, [{ title: 'x' }]);
-});
-
 test('prune honors a custom ttlDays', () => {
   const now = Date.now();
   const tenDaysAgo = new Date(now - 10 * 86400 * 1000).toISOString();
@@ -179,48 +148,4 @@ test('prune honors a custom ttlDays', () => {
   assert.deepEqual(pruneSeen({ k: tenDaysAgo }, 5), {});
   // With a 30-day TTL it survives.
   assert.deepEqual(Object.keys(pruneSeen({ k: tenDaysAgo }, 30)), ['k']);
-});
-
-// ---- partitionForManual --------------------------------------------------
-test('partitionForManual splits flagged (cached) vs fresh units', () => {
-  const flaggedEv = normalizeEvent({ title: 'Old', session_id: 'a', source: 'audio' });
-  const freshEv = normalizeEvent({ title: 'New', session_id: 'b', source: 'audio' });
-  const kbdFreshEv = normalizeEvent({ title: 'Typed', source_ref: 'k1', source_kind: 'keyboard' });
-
-  const cachedCopy = { title: 'Old (cached)', startAt: null };
-  const extractedUnits = {
-    'audio:a': { ts: new Date().toISOString(), events: [cachedCopy] },
-  };
-
-  const { flaggedUnits, freshEvents } = partitionForManual(
-    [flaggedEv, freshEv, kbdFreshEv],
-    extractedUnits
-  );
-
-  assert.equal(flaggedUnits.length, 1);
-  assert.equal(flaggedUnits[0].key, 'audio:a');
-  // Flagged unit re-displays the CACHED events, not the incoming one.
-  assert.deepEqual(flaggedUnits[0].events, [cachedCopy]);
-
-  assert.deepEqual(freshEvents.map((e) => e.title), ['New', 'Typed']);
-});
-
-test('partitionForManual dedups repeated flagged keys and treats keyless as fresh', () => {
-  const ev1 = normalizeEvent({ title: 'A', session_id: 'a', source: 'audio' });
-  const ev2 = normalizeEvent({ title: 'B', session_id: 'a', source: 'audio' }); // same unit
-  const keyless = normalizeEvent({ title: 'NoRef' }); // no source_ref -> fresh
-
-  const extractedUnits = { 'audio:a': { ts: new Date().toISOString(), events: [] } };
-  const { flaggedUnits, freshEvents } = partitionForManual([ev1, ev2, keyless], extractedUnits);
-
-  assert.equal(flaggedUnits.length, 1);
-  assert.equal(flaggedUnits[0].key, 'audio:a');
-  assert.deepEqual(freshEvents.map((e) => e.title), ['NoRef']);
-});
-
-test('partitionForManual with empty extractedUnits treats everything as fresh', () => {
-  const ev = normalizeEvent({ title: 'A', session_id: 'a', source: 'audio' });
-  const { flaggedUnits, freshEvents } = partitionForManual([ev], {});
-  assert.deepEqual(flaggedUnits, []);
-  assert.equal(freshEvents.length, 1);
 });

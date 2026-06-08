@@ -4,3 +4,9 @@ docs/*
 docs/superpowers/*
 !docs/superpowers/specs/
 .gitnexus
+
+# macOS cruft
+.DS_Store
+
+# build output (unrelated project artifacts)
+dist/

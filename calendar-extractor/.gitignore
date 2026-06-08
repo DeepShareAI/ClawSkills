@@ -1,0 +1,5 @@
+# Per-user local dedup/runtime state — generated at runtime and by tests, not source.
+data/
+
+# Local design/plan notes (kept out of the published skill bundle).
+docs/

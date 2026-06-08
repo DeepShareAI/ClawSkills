@@ -49,9 +49,7 @@ function readJson(filePath) {
 
 // Atomic write: serialize to a sibling .tmp file then rename over the target.
 // rename(2) is atomic on the same filesystem, so a kill mid-write can never
-// leave a half-written (and thus unparseable) state file behind. This matters
-// now that per-completion auto pushes write the state file far more often than
-// the old twice-daily cron did.
+// leave a half-written (and thus unparseable) state file behind.
 function writeJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;

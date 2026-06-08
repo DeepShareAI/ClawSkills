@@ -1,1 +1,12 @@
-docs/
+docs/*
+# Keep design specs in-repo (mirrors javis-server's docs/superpowers/specs convention).
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+.gitnexus
+
+# macOS cruft
+.DS_Store
+
+# build output (unrelated project artifacts)
+dist/

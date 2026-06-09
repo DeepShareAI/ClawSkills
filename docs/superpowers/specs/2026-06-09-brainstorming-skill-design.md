@@ -46,8 +46,9 @@ echo '<card-json>' | node scripts/brainstorming.js push    ← script: I/O
    │  • dedup against local seen map (30-day TTL)
    │  • POST /api/skill/data  skill="brainstorming" type="todo" status="pending"
    ▼
-iOS Calendar tab: bare to-do card rendered INLINE among event rows
-   "🧠 Brainstorm — <title>"  [ Copy to Claude to continue ]  Dismiss
+iOS Calendar tab: calendar-style to-do card rendered INLINE among event rows
+   "🧠 Brainstorm — <title>"   [ Confirm ] [ Discard ]
+   (Confirm copies payload.prompt to the clipboard + marks the row confirmed)
 ```
 
 ## Components
@@ -125,13 +126,14 @@ rows from `calendar-extractor`'s `type=event` rows.
 |---|---|
 | Fetch | `GET /api/skill/data?skill=brainstorming&type=todo` (Clerk JWT); refresh on `skill_data_updated` SSE |
 | Placement | **Inline** in the existing **Calendar** list, interleaved with event rows; a `todo` row has no date, so it sorts to today/top |
-| Card face | bare — `🧠 Brainstorm` badge + `payload.title` + one button + `Dismiss`. No goal/request/key-points shown |
-| **Copy to Claude to continue** | `UIPasteboard.general.string = payload.prompt` → toast (reuse `SelectableText.swift:74` logic) |
-| Dismiss | `POST /api/skill/data/discard` (row deleted) |
-| Mark done | `POST /api/skill/data/confirm` (status→confirmed; optionally hidden) |
+| Card face | **calendar-style**, same as a pending event card — dashed, `🧠 Brainstorm` badge + `payload.title` + a meta line ("pending — Confirm to send to Claude") + a **Confirm / Discard** row. Purple accent distinguishes it from orange events. No goal/request/key-points/prompt shown |
+| **Confirm** | (1) `UIPasteboard.general.string = payload.prompt` → toast "copied — paste into Claude" (reuse `SelectableText.swift:74` logic); (2) `POST /api/skill/data/confirm` (status→confirmed). The prompt rides on Confirm — there is no separate copy button |
+| **Discard** | `POST /api/skill/data/discard` (row deleted) |
 
 iOS work required: the Calendar list view must dispatch on `type` and render a `todo`
-row (today it is hardcoded to `type=event`). This is the only client change.
+row (today it is hardcoded to `type=event`), reusing the existing Confirm/Discard button
+row. The Confirm handler additionally writes `payload.prompt` to the pasteboard before
+posting confirm. This is the only client change.
 
 ## Dedup & state
 

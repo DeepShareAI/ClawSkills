@@ -1,6 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": [
-    "calendar-extractor"
+    "calendar-extractor",
+    "javis-brainstorming"
   ]
 }

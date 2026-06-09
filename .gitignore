@@ -10,3 +10,9 @@ docs/superpowers/*
 
 # build output (unrelated project artifacts)
 dist/
+
+# Per-user local dedup/runtime state — generated at runtime and by tests, not source.
+calendar-extractor/data/
+
+# Local design/plan notes (kept out of the published skill bundle).
+calendar-extractor/docs/

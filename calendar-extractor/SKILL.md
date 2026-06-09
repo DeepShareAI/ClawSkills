@@ -1,6 +1,6 @@
 ---
 name: calendar-extractor
-description: Extract calendar events from recent recording and keyboard transcripts and push a markdown digest to your iOS chat. Use on demand when the user asks for "today's meetings" / "calendar extract" / "今日会议" / "提取日历", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also invokes this skill automatically once the user approves a calendar proposal. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.
+description: Extract calendar events from recent recording and keyboard transcripts and push a markdown digest to your iOS chat. Use on demand when the user asks for "today's meetings" / "calendar extract" / "今日会议" / "提取日历", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the calendar route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; extracted events are written PENDING and become solid only when the user taps Confirm in the iOS calendar table. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.
 keywords: today's meetings, calendar extract, 今日会议, 提取日历, calendar-extractor
 metadata:
   openclaw:
@@ -24,7 +24,7 @@ metadata:
 - "calendar extract"
 - "今日会议"
 - "提取日历"
-- Automatically, when the javis-server session dispatcher runs this skill after the user approves a calendar proposal (see "How this skill is invoked").
+- Automatically, when the javis-server session dispatcher **auto-runs** this skill after a completed unit matches the calendar route — no approve-to-run card (see "How this skill is invoked").
 
 ## Core commands
 
@@ -37,7 +37,7 @@ metadata:
 # Step 1 — fetch recent transcripts as JSON (the agent extracts events from this)
 node scripts/calendar-extractor.js fetch [--hours N] [--limit N]
 
-# Step 1 (dispatcher run) — fetch ONE completed unit (the approved proposal's unit)
+# Step 1 (dispatcher run) — fetch ONE completed unit (the auto-run dispatcher unit)
 node scripts/calendar-extractor.js fetch --session <sessionId> [--hours N]   # audio unit
 node scripts/calendar-extractor.js fetch --kbd-input <inputId> [--hours N]   # keyboard unit
 
@@ -76,28 +76,34 @@ reads the fetched transcripts and emits a JSON array of events.
    party at 6pm" → 18:00). If the transcript does not provide enough information to determine a unique date/time (for example, only "next Friday" with no weekday anchor or an ambiguous time like "at 8" without AM/PM), emit `null` for the unresolved field rather than guessing. When multiple plausible interpretations are equally supported by the transcript, prefer the most specific one; if two interpretations remain equally plausible, emit `null` for the unresolved field rather than guessing. If the transcript mentions recurring meetings, all-day meetings, or multi-day events, preserve them as a single event only when the recurrence is explicit; otherwise emit a single event with the best available start/end times and note the ambiguity in `notes`.
 3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
-   - best-effort mirrors the **new** events to `POST /api/skill/data` (upsert by `dedup_key`) for the iOS app to read,
+   - best-effort mirrors the **new** events to `POST /api/skill/data` (upsert by `dedup_key`) **tagged `status: "pending"`** so the server stores them pending and the iOS calendar table shows them greyed/dashed with **Confirm · Discard** — an event becomes solid only when the user taps **Confirm** (Discard deletes it),
    - formats the **new** events as a markdown digest and delivers it via
-     `POST http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<markdown>"}`.
+     `POST http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<markdown>"}` (the digest is informational and unchanged — it is not a confirmation gate).
 
 ## How this skill is invoked
 
-This skill has **two triggers** (dispatcher-approve and manual).
+This skill has **two triggers** (dispatcher auto-run and manual).
 
-1. **Dispatcher-approve (automatic, human-gated).** When a unit of input completes (an
-   audio session ends or a keyboard input is saved), the javis-server **session
-   dispatcher** classifies the transcript. If it finds scheduling content and an enabled
-   `calendar` route matches, the server persists a `DispatchProposal` and pushes a
-   proposal card to iOS. The user taps **Approve** → the server claims run-once
-   (`DispatchRouteExecuted (user, unit, route)`) and runs this skill in the user's
-   container with a generic prompt of the form
-   `Run /calendar-extractor for <unit>. Deliverable: …`. The agent parses `<unit>`
-   (`audio:<session_id>` or `kbd:<keyboard_input.id>`), runs `fetch --session <id>` /
-   `fetch --kbd-input <id>`, extracts events, and pushes the digest. **The skill does not
-   self-gate** — the server owns run-once and the human approval gate.
+1. **Dispatcher auto-run (automatic).** When a unit of input completes (an audio
+   session ends or a keyboard input is saved), the javis-server **session dispatcher**
+   classifies the transcript. If it finds scheduling content and an enabled `calendar`
+   route matches, the server claims run-once (`DispatchRouteExecuted (user, unit,
+   route)`) and **AUTO-RUNS this skill directly — there is no approve-to-run proposal
+   card**. It runs in the user's container with a prompt of the form
+   `Run /calendar-extractor for <unit>. Deliverable: …`, where the deliverable text is
+   the dispatcher's classification carried as an **advisory HINT** — the agent may use
+   it alongside the transcript, but should still read the unit transcript for full
+   detail (time, attendees). The agent parses `<unit>` (`audio:<session_id>` or
+   `kbd:<keyboard_input.id>`), runs `fetch --session <id>` / `fetch --kbd-input <id>`,
+   extracts events, and pushes them. **The human gate is not running the skill — it is
+   Confirm/Discard on the produced events:** every extracted event is written
+   **PENDING** to the calendar table (greyed/dashed with **Confirm · Discard**) and
+   becomes solid only when the user taps **Confirm** (Discard deletes it). **The skill
+   does not self-gate** — the server owns run-once.
 2. **Manual ("today's meetings").** On demand, the agent runs the windowed
    `fetch` (last 24h by default) → extracts → pushes. Repeating the ask re-runs
    extraction on the window; the `seen` map still prevents duplicate delivery.
+   Manual writes are also **PENDING** (consistent "confirm to keep").
 
 The route contract the javis-server team must satisfy (RouteRegistry row,
 `classify_and_route` deliverable shape, prompt contract) is declared in this file's
@@ -111,13 +117,18 @@ The route contract the javis-server team must satisfy (RouteRegistry row,
   (`"audio"` | `"keyboard"`); a single keyboard unit resolves via
   `GET /api/transcripts/keyboard-input/<id>`. Plus per-user local state (dedup memory). There is no
   `HTTP_SOURCE_URL` — the script talks to javis-server directly.
+- **Events are written PENDING.** Every event mirrored to `/api/skill/data` carries
+  `status: "pending"`; the server stores it pending and the iOS calendar table renders it
+  greyed/dashed with **Confirm · Discard**. **Confirm** promotes the row to solid (`confirmed`);
+  **Discard** deletes it. This is the human gate — there is no approve-to-run proposal card.
 - **Dedup is local-state-authoritative, event-level only.** The container's gateway token can
   WRITE to `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk JWT),
   so novelty is decided by the local `seen` map; the server write is a best-effort mirror for the
   iOS app. There is **no per-unit gating** in the skill — the server owns run-once
-  (`DispatchRouteExecuted`) and approval, so the only local dedup is the event-level `seen` map
-  (`{ "<event-key>": "<ts>" }` in `data/users/<userId>.json`, 30-day TTL-pruned). It keeps a
-  duplicate event from re-reaching the table/chat across overlapping manual windows or a re-run.
+  (`DispatchRouteExecuted`); the human gate is Confirm/Discard on the pending rows. So the only
+  local dedup is the event-level `seen` map (`{ "<event-key>": "<ts>" }` in
+  `data/users/<userId>.json`, 30-day TTL-pruned). It keeps a duplicate event from re-reaching the
+  table/chat across overlapping manual windows or a re-run.
 - **Timezone**: there is **no prefs file**. The skill resolves tz in order:
   the `tz` field on the fetch payload → the `TZ` environment variable → the system zone
   (`Intl.DateTimeFormat().resolvedOptions().timeZone`). The manual and dispatcher paths resolve tz

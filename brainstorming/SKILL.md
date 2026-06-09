@@ -1,5 +1,5 @@
 ---
-name: brainstorming
+name: javis-brainstorming
 description: Turn a brainstorm-worthy voice/keyboard unit into a generic "to-do card" whose ready-to-paste prompt hands off to Claude's content-brainstorming skill (with javis_mcp pulling the source transcript). This skill does NO brainstorming itself — it composes a hand-off prompt and writes a type="todo" card. Use on demand when the user asks to "brainstorm this" / "整理成簡報" / "帮我腦力激盪", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the brainstorm route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; the card is written PENDING and the human gate is Confirm/Discard in the iOS Calendar tab (Confirm copies the card's prompt into the clipboard to paste into Claude). Triggers: 'brainstorm this', '整理成簡報', '帮我腦力激盪'.
 keywords: brainstorm this, brainstorm, 整理成簡報, 帮我腦力激盪, content-brainstorming, todo card, brainstorming
 metadata:
@@ -8,7 +8,7 @@ metadata:
       node: ">=18"
   routes:
     - route_id: brainstorm
-      skill: brainstorming
+      skill: javis-brainstorming
       matches: "ideation, help me organize my thoughts, presentation/deck planning, turn this into a brief, brainstorm, structure these ideas"
       args_template: null
       risk: low

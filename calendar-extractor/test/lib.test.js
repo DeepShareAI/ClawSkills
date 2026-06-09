@@ -113,7 +113,19 @@ test('buildSkillDataItems emits naive-local start/end and instant-based dedup_ke
   assert.doesNotMatch(item.start_at, /Z$/);
   assert.equal(item.dedup_key, dedupKey(ev));          // dedup identity unchanged
   assert.equal(item.source_ref, '521');
+  assert.equal(item.status, 'pending');                // Flow 3: written pending, confirm-to-solid
   assert.deepEqual(item.payload, { title: 'Meeting', location: null, attendees: [], notes: null });
+});
+
+test('buildSkillDataItems tags every event status "pending" (Flow 3)', () => {
+  const events = [
+    normalizeEvent({ title: 'A', start_at: '2026-06-06T04:00:00Z' }),
+    normalizeEvent({ title: 'B' }),                       // no start_at
+    normalizeEvent({ title: 'C', start_at: '2026-06-07T15:00:00Z' }),
+  ];
+  const items = buildSkillDataItems(events, 'America/Los_Angeles');
+  assert.equal(items.length, 3);
+  for (const item of items) assert.equal(item.status, 'pending');
 });
 
 test('buildSkillDataItems preserves null start/end and tolerates empty input', () => {

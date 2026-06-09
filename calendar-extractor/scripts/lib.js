@@ -93,6 +93,10 @@ function localAnchor(iso, tz) {
 // Build the POST /api/skill/data items array. dedup_key stays instant-based
 // (stable identity, unchanged by this fix); start_at/end_at are naive-local so
 // the iOS calendar table renders the same local time as the push digest.
+//
+// Every mirrored event is tagged status:"pending" (Flow 3): the server stores it
+// pending and the iOS calendar table renders it greyed/dashed with Confirm/Discard.
+// A pending row becomes solid only when the user taps Confirm; Discard deletes it.
 function buildSkillDataItems(events, tz) {
   return (events || []).slice(0, 500).map((ev) => ({
     dedup_key: dedupKey(ev),
@@ -100,6 +104,7 @@ function buildSkillDataItems(events, tz) {
     start_at: toNaiveLocal(ev.startAt, tz),
     end_at: toNaiveLocal(ev.endAt, tz),
     source_ref: ev.sourceRef,
+    status: 'pending',
   }));
 }
 

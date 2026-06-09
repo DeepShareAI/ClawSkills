@@ -57,7 +57,10 @@ const {
 } = require('./lib');
 const { buildTodoItem, postTodoCards } = require('./todo-card');
 
-const SLUG = 'brainstorming';
+// Must equal the published clawhub slug: the server seeds the dispatch route only
+// when metadata.routes[].skill == install slug, and the dispatcher then triggers
+// /<slug>, so SKILL.md name + route.skill + this SLUG must all match the slug.
+const SLUG = 'javis-brainstorming';
 const ICON = '🧠';
 const SERVER = process.env.JAVIS_SERVER_URL || 'http://javis-server:8000';
 

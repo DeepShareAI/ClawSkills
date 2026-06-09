@@ -1,5 +1,10 @@
-# Design specs / docs are kept out of the published repo.
-docs/
+# Design specs / docs are kept out of the published repo,
+# EXCEPT docs/superpowers/specs/ (approved design specs live in-repo).
+# Note: must un-ignore each level — a bare `docs/` stops git descending.
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
 .gitnexus
 
 # macOS cruft
@@ -13,3 +18,6 @@ calendar-extractor/data/
 
 # Local design/plan notes (kept out of the published skill bundle).
 calendar-extractor/docs/
+
+# superpowers brainstorm visual companion
+.superpowers/

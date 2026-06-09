@@ -1,8 +1,5 @@
-docs/*
-# Keep design specs in-repo (mirrors javis-server's docs/superpowers/specs convention).
-!docs/superpowers/
-docs/superpowers/*
-!docs/superpowers/specs/
+# Design specs / docs are kept out of the published repo.
+docs/
 .gitnexus
 
 # macOS cruft

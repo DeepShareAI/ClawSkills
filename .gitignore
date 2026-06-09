@@ -15,6 +15,7 @@ dist/
 
 # Per-user local dedup/runtime state — generated at runtime and by tests, not source.
 calendar-extractor/data/
+brainstorming/data/
 
 # Local design/plan notes (kept out of the published skill bundle).
 calendar-extractor/docs/

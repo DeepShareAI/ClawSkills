@@ -3,10 +3,10 @@
  * brainstorming — pure logic library (no network, no stdin, no fs).
  *
  * Everything here is deterministic and unit-testable: tz resolution,
- * the relative-date anchor, the to-do dedup key, the ready-to-paste
- * prompt-template assembly, the Agent Chat digest markdown, and TTL
- * pruning of the local `seen` map. The CLI (`brainstorming.js`)
- * requires these and stays thin.
+ * the relative-date anchor, the source-session journal window, the
+ * to-do dedup key, the ready-to-paste prompt-template assembly, the
+ * Agent Chat digest markdown, and TTL pruning of the local `seen` map.
+ * The CLI (`brainstorming.js`) requires these and stays thin.
  */
 'use strict';
 
@@ -26,8 +26,12 @@ function resolveTz(payloadTz) {
 }
 
 // ---- naive-local wall-clock ----------------------------------------------
-// Render an instant as zoneless local wall-clock in `tz` (no Z). Used only for
-// the relative-date anchor handed to the agent; to-do rows carry NO date.
+// Render an instant as zoneless local wall-clock in `tz` (no Z). Used for the
+// relative-date anchor handed to the agent AND for the card's start_at/end_at
+// journal window (sessionWindow below). Identical convention to
+// calendar-extractor/scripts/lib.js → toNaiveLocal: iOS reads skill_data
+// start_at/end_at as naive LOCAL wall-clock in the device tz, so a UTC `Z`
+// instant would be re-read as device-local and shift by the tz offset.
 function toNaiveLocal(iso, tz) {
   if (!iso) return null;
   const d = new Date(iso);
@@ -68,8 +72,61 @@ function localAnchor(iso, tz) {
   };
 }
 
+// ---- source-session journal window ----------------------------------------
+// Resolve the card's OPTIONAL start_at/end_at from its source sessions (journal
+// semantics: the card lands on the day the idea was captured). Among the fetch
+// sessions whose id is in the card's source_refs and whose `started_at` is a
+// usable instant, pick the EARLIEST started_at and serialize THAT same
+// session's started_at/ended_at as naive-local wall-clock in `tz` (the
+// calendar-extractor convention, see toNaiveLocal). Returns { start_at?,
+// end_at? }: `end_at` is omitted when that session's ended_at is missing or
+// malformed, and the result is {} (omit both) when no source session has a
+// usable started_at — we NEVER invent dates; the card degrades to the legacy
+// dateless rendering (pinned to today on iOS).
+//
+// Instant shapes accepted (instantIso below): the LIVE wire contract is
+// NUMERIC — javis-server's TranscriptsRecentSession declares started_at/
+// ended_at as Optional[float] EPOCH SECONDS (UTC instants) and populates them
+// for audio (AudioRecording.start_time) and keyboard (created_at.timestamp())
+// alike on both endpoints this skill fetches. Epoch seconds are unambiguous:
+// new Date(s * 1000) is the exact instant, rendered in `tz` by toNaiveLocal.
+// ISO strings are also accepted for forward-compat / fixtures.
+function instantIso(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return new Date(v * 1000).toISOString();
+  if (typeof v === 'string' && !isNaN(Date.parse(v))) return v;
+  return null;
+}
+
+function sessionWindow(sessions, sourceRefs, tz) {
+  const refs = new Set(
+    (Array.isArray(sourceRefs) ? sourceRefs : []).map((r) => String(r).trim()).filter(Boolean)
+  );
+  if (!refs.size || !Array.isArray(sessions)) return {};
+  let best = null;
+  for (const s of sessions) {
+    if (!s || typeof s !== 'object') continue;
+    const id = ((s.session_id || s.id) || '').toString().trim();
+    if (!id || !refs.has(id)) continue;
+    const iso = instantIso(s.started_at);
+    if (!iso) continue;
+    const t = Date.parse(iso);
+    if (isNaN(t)) continue;
+    if (!best || t < best.t) best = { t, iso, s };
+  }
+  if (!best) return {};
+  const start_at = toNaiveLocal(best.iso, tz);
+  if (!start_at) return {};
+  const out = { start_at };
+  const endIso = instantIso(best.s.ended_at);
+  const end_at = endIso ? toNaiveLocal(endIso, tz) : null;
+  if (end_at) out.end_at = end_at;
+  return out;
+}
+
 // ---- to-do dedup key -----------------------------------------------------
-// A to-do card has no date, so its identity is (title + goal). Hashing the goal
+// A to-do card's identity is (title + goal) — the journal window is metadata,
+// not identity (re-running on the same unit must not mint a new card just
+// because timestamps shifted). Hashing the goal
 // keeps the key stable and bounded even for long goals. Two cards with the same
 // title but different goals stay distinct (re-brainstorming the same unit toward
 // a new objective is a genuinely new card).
@@ -96,8 +153,10 @@ function todoDedupKey(card) {
 
 // ---- ready-to-paste prompt-template assembly -----------------------------
 // The literal template from the design spec. The agent supplies the bracketed
-// fields ({goal, request[], source_refs[]}); everything else is fixed text so a
-// Confirm always copies a coherent content-brainstorming hand-off prompt.
+// fields ({goal, request[], source_refs[]}); everything else is fixed text so
+// `payload.prompt` is always a coherent content-brainstorming hand-off prompt
+// (it stays on the card payload and in the chat digest; the handoff path is
+// the Agent Chat session reached by tapping the card — Confirm only saves).
 function composePrompt(card) {
   const goal = normalizeText(card && card.goal) || 'organize my thoughts on this';
   const refs = Array.isArray(card && card.source_refs)
@@ -150,7 +209,7 @@ function formatDigest(card) {
   const refs = Array.isArray(card.source_refs) ? card.source_refs.filter(Boolean) : [];
   if (refs.length) lines.push(`  - 📡 ${refs.length === 1 ? '1 session' : `${refs.length} sessions`}`);
   lines.push('');
-  lines.push('✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.');
+  lines.push('✅ **Confirm** in the Calendar tab saves it to your calendar · **Discard** drops it · tap the card anytime to reopen this chat.');
   return lines.join('\n');
 }
 
@@ -179,6 +238,7 @@ module.exports = {
   resolveTz,
   toNaiveLocal,
   localAnchor,
+  sessionWindow,
   normalizeText,
   hash32,
   todoDedupKey,

@@ -22,7 +22,8 @@
  *   push   read a to-do-card JSON object on stdin, dedup it against per-user local
  *          state (the `seen` map, 30-day TTL), and write it to
  *          POST /api/skill/data type="todo" status="pending" (best-effort mirror),
- *          plus an OPTIONAL tiny /api/agent/push nudge. The skill does NOT
+ *          then deliver a markdown digest of the card via /api/agent/push (NON-FATAL
+ *          — the summary line reports delivered / FAILED). The skill does NOT
  *          self-gate per unit — the server owns run-once (DispatchRouteExecuted).
  *
  * Usage:
@@ -41,7 +42,7 @@
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key; type=todo)
- *   POST /api/agent/push          (get_gateway_user; {skill, content})  — optional nudge
+ *   POST /api/agent/push          (get_gateway_user; {skill, content})  — chat digest
  */
 'use strict';
 
@@ -53,6 +54,7 @@ const {
   localAnchor,
   todoDedupKey,
   composePrompt,
+  formatDigest,
   pruneSeen,
 } = require('./lib');
 const { buildTodoItem, postTodoCards } = require('./todo-card');
@@ -239,13 +241,14 @@ async function readStdinCard() {
   return normalizeCard(raw);
 }
 
-// Optional tiny nudge so the user notices a new card landed in the Calendar tab.
-async function pushNudge(token, card) {
-  const content = `## ${card.icon} Brainstorm — ${card.title}\n\nA new brainstorm card is waiting in your Calendar tab — Confirm to copy the prompt into Claude, or Discard.`;
+// Deliver the Agent Chat digest of a novel card: iOS renders the slug as a
+// `[push:javis-brainstorming]` user bubble and the formatDigest(card) markdown
+// (calendar-extractor style) as the Javis message.
+async function pushDigest(token, card) {
   const res = await fetch(`${SERVER}/api/agent/push`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skill: SLUG, content }),
+    body: JSON.stringify({ skill: SLUG, content: formatDigest(card) }),
   });
   if (!res.ok) throw new Error(`POST /api/agent/push -> HTTP ${res.status}`);
 }
@@ -254,21 +257,21 @@ async function pushNudge(token, card) {
 // recording mock instead of the real javis-server client.
 const defaultPushClient = {
   write: (token, items) => postTodoCards({ skill: SLUG, items, token, server: SERVER }),
-  nudge: (token, card) => pushNudge(token, card),
+  digest: (token, card) => pushDigest(token, card),
 };
 
 // ---- push ----------------------------------------------------------------
 // The skill does NOT self-gate per unit (the server owns run-once). push only
 // dedups the card against the `seen` map so the same card is never written twice
 // across overlapping manual windows or a re-run. A genuinely novel card is
-// written type="todo" status="pending"; an OPTIONAL nudge tells the user.
+// written type="todo" status="pending", then its Agent Chat digest is delivered.
 async function doPush(deps = {}) {
   const client = deps.client || defaultPushClient;
   const load = deps.load || loadState;
   const save = deps.save || saveState;
   const token = deps.token || requireToken();
   const card = 'card' in deps ? deps.card : await readStdinCard();
-  const nudge = deps.nudge !== undefined ? deps.nudge : true;
+  const digest = deps.digest !== undefined ? deps.digest : true;
 
   const state = load();
   const seen = pruneSeen(state.seen || {});
@@ -308,16 +311,25 @@ async function doPush(deps = {}) {
   try { await client.write(token, [item]); }
   catch (e) { console.error('⚠️ skill_data write failed (non-fatal):', e.message); }
 
-  if (nudge) {
-    try { await client.nudge(token, card); }
-    catch (e) { console.error('⚠️ agent push nudge failed (non-fatal):', e.message); }
+  // The digest is a first-class step but stays NON-FATAL: a delivery failure
+  // must never lose the pending card (already written above) nor fail the run.
+  // Its outcome is reported explicitly in the summary line so a broken push
+  // chain is diagnosable from the agent run log instead of silent.
+  let digestNote = '';
+  if (digest) {
+    digestNote = ' Chat digest: delivered.';
+    try { await client.digest(token, card); }
+    catch (e) {
+      console.error('⚠️ agent push digest failed (non-fatal):', e.message);
+      digestNote = ` Chat digest FAILED: ${e.message}`;
+    }
   }
 
   seen[card.dedupKey] = nowIso;
   state.seen = seen;
   state.lastRunAt = nowIso;
   save(state);
-  console.log(`Wrote 1 brainstorm to-do card (${card.title}).`);
+  console.log(`Wrote 1 brainstorm to-do card (${card.title}).${digestNote}`);
 }
 
 async function main() {
@@ -330,6 +342,7 @@ async function main() {
 module.exports = {
   doFetch,
   doPush,
+  pushDigest,
   filterToUnit,
   sessionSource,
   sessionId,

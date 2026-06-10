@@ -4,8 +4,9 @@
  *
  * Everything here is deterministic and unit-testable: tz resolution,
  * the relative-date anchor, the to-do dedup key, the ready-to-paste
- * prompt-template assembly, and TTL pruning of the local `seen` map.
- * The CLI (`brainstorming.js`) requires these and stays thin.
+ * prompt-template assembly, the Agent Chat digest markdown, and TTL
+ * pruning of the local `seen` map. The CLI (`brainstorming.js`)
+ * requires these and stays thin.
  */
 'use strict';
 
@@ -124,6 +125,35 @@ function composePrompt(card) {
   ].join('\n');
 }
 
+// ---- Agent Chat digest ----------------------------------------------------
+// Markdown digest of ONE composed card for POST /api/agent/push — same shape as
+// calendar-extractor's formatDigest (header + bold title + sub-bullets), so iOS
+// renders `[push:javis-brainstorming]` + this content in the Agent Chat. The
+// header and footer are fixed text (the card icon replaces 🧠 if the agent
+// overrode it); the 🎯/📋/📡 sub-bullets degrade gracefully — each is omitted
+// when the card has no goal / no request items / no source refs. `card` is
+// assumed non-null with a non-empty title (normalizeCard guarantees both).
+// Card text is LLM-composed, so title/goal/request items may carry interior
+// newlines; collapse all whitespace to single spaces so a multi-line value
+// cannot break the bullet structure or inject a top-level markdown header.
+function oneLine(v) {
+  return String(v).replace(/\s+/g, ' ').trim();
+}
+
+function formatDigest(card) {
+  const icon = (card.icon && String(card.icon).trim()) || '🧠';
+  const lines = [`## ${icon} Brainstorm — new card / 新腦力激盪`, ''];
+  lines.push(`- **${oneLine(card.title)}**`);
+  if (card.goal) lines.push(`  - 🎯 ${oneLine(card.goal)}`);
+  const request = Array.isArray(card.request) ? card.request.filter(Boolean) : [];
+  if (request.length) lines.push(`  - 📋 ${request.map(oneLine).join(' · ')}`);
+  const refs = Array.isArray(card.source_refs) ? card.source_refs.filter(Boolean) : [];
+  if (refs.length) lines.push(`  - 📡 ${refs.length === 1 ? '1 session' : `${refs.length} sessions`}`);
+  lines.push('');
+  lines.push('✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.');
+  return lines.join('\n');
+}
+
 // ---- TTL pruning ---------------------------------------------------------
 // Generic pruner for any { key: <something-with-a-timestamp> } map. `tsOf`
 // extracts the ISO timestamp from each value; entries older than the 30-day
@@ -153,6 +183,7 @@ module.exports = {
   hash32,
   todoDedupKey,
   composePrompt,
+  formatDigest,
   pruneByTtl,
   pruneSeen,
 };

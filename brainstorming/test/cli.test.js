@@ -18,19 +18,42 @@ const assert = require('node:assert/strict');
 const {
   doFetch,
   doPush,
+  pushDigest,
   normalizeCard,
   defaultSubtitle,
 } = require('../scripts/brainstorming');
 
-// A recording push client: captures every write() (skill_data) and nudge()
-// (agent push) call so a test can assert exactly what hit each endpoint.
+// A recording push client: captures every write() (skill_data) and digest()
+// (agent push) call so a test can assert exactly what hit each endpoint. The
+// digest mock records the RAW card doPush forwarded through the seam; the
+// content the real client (pushDigest) builds from that card is pinned
+// separately by the fetch-stub tests below.
 function makeClient() {
-  const calls = { write: [], nudge: [] };
+  const calls = { write: [], digest: [] };
   return {
     calls,
     write: async (_token, items) => { calls.write.push(items); },
-    nudge: async (_token, card) => { calls.nudge.push(card); },
+    digest: async (_token, card) => { calls.digest.push(card); },
   };
+}
+
+// Run `fn` with global.fetch stubbed, recording every call; always restores.
+async function withFetchStub(impl, fn) {
+  const calls = [];
+  const orig = global.fetch;
+  global.fetch = async (url, opts) => { calls.push({ url, opts }); return impl(url, opts); };
+  try { await fn(calls); } finally { global.fetch = orig; }
+}
+
+// Capture console.log/error around a doPush so the summary line is assertable.
+async function captureLogs(fn) {
+  const logs = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a) => logs.push(a.join(' '));
+  console.error = () => {};
+  try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+  return logs;
 }
 
 function makeStore(initial) {
@@ -145,11 +168,13 @@ test('defaultSubtitle pluralizes by session count', () => {
 });
 
 // ---- push: write a type=todo pending card + record in `seen` -------------
-test('doPush writes one type=todo pending item, nudges, and records it in `seen`', async () => {
+test('doPush writes one type=todo pending item, delivers the digest, and records it in `seen`', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });
+  const card = normalizeCard(SAMPLE_CARD);
 
-  await doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), ...store, now: NOW });
+  const logs = await captureLogs(() =>
+    doPush({ token: 't', client, card, ...store, now: NOW }));
 
   assert.equal(client.calls.write.length, 1);
   const [item] = client.calls.write[0];
@@ -158,11 +183,30 @@ test('doPush writes one type=todo pending item, nudges, and records it in `seen`
   assert.equal(item.payload.title, SAMPLE_CARD.title);
   assert.match(item.payload.prompt, /content-brainstorming flow/);
   assert.ok(!('start_at' in item), 'to-do row carries no date');
-  assert.equal(client.calls.nudge.length, 1);
+  // doPush hands the UNMODIFIED normalized card through the digest seam; what
+  // pushDigest renders from it is pinned by the fetch-stub tests below.
+  assert.equal(client.calls.digest.length, 1);
+  assert.deepEqual(client.calls.digest[0], card);
   assert.equal(Object.keys(store.box.state.seen).length, 1);
+  // The summary line reports the digest delivery explicitly.
+  assert.equal(logs.at(-1), `Wrote 1 brainstorm to-do card (${SAMPLE_CARD.title}). Chat digest: delivered.`);
 });
 
-test('doPush dedups: an already-seen card is not re-written or re-nudged', async () => {
+test('doPush digest failure is non-fatal: card written, seen recorded, summary reports the reason', async () => {
+  const client = makeClient();
+  client.digest = async () => { throw new Error('POST /api/agent/push -> HTTP 502'); };
+  const store = makeStore({ userId: 'self' });
+
+  const logs = await captureLogs(() =>
+    doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), ...store, now: NOW }));
+
+  assert.equal(client.calls.write.length, 1, 'the pending card write still happens');
+  assert.equal(Object.keys(store.box.state.seen).length, 1, 'the card is still recorded seen');
+  assert.equal(logs.at(-1),
+    `Wrote 1 brainstorm to-do card (${SAMPLE_CARD.title}). Chat digest FAILED: POST /api/agent/push -> HTTP 502`);
+});
+
+test('doPush dedups: an already-seen card is not re-written and sends no digest', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });
 
@@ -171,28 +215,67 @@ test('doPush dedups: an already-seen card is not re-written or re-nudged', async
 
   await doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), ...store, now: NOW });
   assert.equal(client.calls.write.length, 1, 'no second write for a seen card');
-  assert.equal(client.calls.nudge.length, 1, 'no second nudge for a seen card');
+  assert.equal(client.calls.digest.length, 1, 'no second digest for a seen card');
 });
 
-test('doPush with a null card (no discernible goal) writes nothing', async () => {
+test('doPush with a null card (no discernible goal) writes nothing and sends no digest', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });
 
   await doPush({ token: 't', client, card: null, ...store, now: NOW });
 
   assert.equal(client.calls.write.length, 0, 'no write when there is no card');
-  assert.equal(client.calls.nudge.length, 0);
+  assert.equal(client.calls.digest.length, 0);
   assert.ok(!store.box.state.seen || Object.keys(store.box.state.seen).length === 0);
 });
 
-test('doPush can suppress the optional nudge', async () => {
+test('doPush can suppress the digest', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });
 
-  await doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), ...store, now: NOW, nudge: false });
+  await doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), ...store, now: NOW, digest: false });
 
   assert.equal(client.calls.write.length, 1, 'card still written');
-  assert.equal(client.calls.nudge.length, 0, 'nudge suppressed');
+  assert.equal(client.calls.digest.length, 0, 'digest suppressed');
+});
+
+// ---- pushDigest: the REAL request body, pinned against a literal ----------
+// These exercise the production pushDigest (not the injected test seam) via a
+// stubbed global fetch, so a regression in the {skill, content} body — e.g.
+// reverting to the old generic nudge string or dropping the slug — fails here.
+test('pushDigest POSTs {skill: slug, content: formatDigest(card)} to /api/agent/push', async () => {
+  const card = normalizeCard(SAMPLE_CARD);
+  await withFetchStub(async () => ({ ok: true }), async (calls) => {
+    await pushDigest('tok-1', card);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/api\/agent\/push$/);
+    assert.equal(calls[0].opts.method, 'POST');
+    assert.equal(calls[0].opts.headers.Authorization, 'Bearer tok-1');
+    assert.equal(calls[0].opts.headers['Content-Type'], 'application/json');
+    const body = JSON.parse(calls[0].opts.body);
+    assert.deepEqual(Object.keys(body).sort(), ['content', 'skill']);
+    assert.equal(body.skill, 'javis-brainstorming');
+    // Expected content written out independently (NOT computed via formatDigest)
+    // so this assertion can actually fail if the digest content regresses.
+    assert.equal(body.content, [
+      '## 🧠 Brainstorm — new card / 新腦力激盪',
+      '',
+      '- **Intro Javis to the OpenClaw community**',
+      '  - 🎯 introduce Javis to the OpenClaw community, for non-engineer users',
+      '  - 📋 an attention hook · a step-by-step demo/onboarding flow',
+      '  - 📡 2 sessions',
+      '',
+      '✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.',
+    ].join('\n'));
+  });
+});
+
+test('pushDigest throws with the HTTP status on a non-ok response', async () => {
+  await withFetchStub(async () => ({ ok: false, status: 502 }), async () => {
+    await assert.rejects(
+      () => pushDigest('tok-1', normalizeCard(SAMPLE_CARD)),
+      /POST \/api\/agent\/push -> HTTP 502/);
+  });
 });
 
 test('doPush does NOT write per-unit gating state (server owns run-once)', async () => {

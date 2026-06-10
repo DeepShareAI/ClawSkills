@@ -1,6 +1,6 @@
 ---
 name: javis-brainstorming
-description: Turn a brainstorm-worthy voice/keyboard unit into a generic "to-do card" whose ready-to-paste prompt hands off to Claude's content-brainstorming skill (with javis_mcp pulling the source transcript). This skill does NO brainstorming itself — it composes a hand-off prompt and writes a type="todo" card. Use on demand when the user asks to "brainstorm this" / "整理成簡報" / "帮我腦力激盪", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the brainstorm route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; the card is written PENDING and a markdown digest of it is delivered to the Agent Chat via POST /api/agent/push (the chat shows [push:javis-brainstorming] + the card summary); the human gate is Confirm/Discard in the iOS Calendar tab (Confirm copies the card's prompt into the clipboard to paste into Claude). Triggers: 'brainstorm this', '整理成簡報', '帮我腦力激盪'.
+description: Turn a brainstorm-worthy voice/keyboard unit into a generic "to-do card" whose ready-to-paste prompt hands off to Claude's content-brainstorming skill (with javis_mcp pulling the source transcript). This skill does NO brainstorming itself — it composes a hand-off prompt and writes a type="todo" card stamped with the source session's start/end times (journal semantics). Use on demand when the user asks to "brainstorm this" / "整理成簡報" / "帮我腦力激盪", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the brainstorm route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; the card is written PENDING and a markdown digest of it is delivered to the Agent Chat via POST /api/agent/push (the chat shows [push:javis-brainstorming] + the card summary); the human gate is Confirm/Discard in the iOS Calendar tab (Confirm saves the card on the calendar as a solid event; tapping the card body opens its Agent Chat session). Triggers: 'brainstorm this', '整理成簡報', '帮我腦力激盪'.
 keywords: brainstorm this, brainstorm, 整理成簡報, 帮我腦力激盪, content-brainstorming, todo card, brainstorming
 metadata:
   openclaw:
@@ -19,10 +19,12 @@ metadata:
 > Turn a brainstorm-worthy voice/keyboard unit into a generic **to-do card** whose
 > `prompt` hands off to Claude's `content-brainstorming` skill. The skill does **no**
 > brainstorming itself — it detects a discernible goal/request in a transcript,
-> **composes** a ready-to-paste Claude prompt, and writes a `type="todo"` card. iOS
+> **composes** a ready-to-paste Claude prompt, and writes a `type="todo"` card
+> stamped with the source session's start/end times (journal semantics). iOS
 > renders that card generically (calendar-style, **Confirm / Discard**) in the
-> Calendar tab; **Confirm** copies `payload.prompt` to the clipboard so you can paste
-> it into Claude. Fetch the last 24 hours of transcript data by default.
+> Calendar tab; **Confirm** saves it on the calendar as a solid event at its
+> session time, and tapping the card body opens the Agent Chat session that holds
+> its digest. Fetch the last 24 hours of transcript data by default.
 
 ## When to use
 
@@ -46,8 +48,10 @@ node scripts/brainstorming.js fetch [--hours N] [--limit N]
 node scripts/brainstorming.js fetch --session <sessionId> [--hours N]   # audio unit
 node scripts/brainstorming.js fetch --kbd-input <inputId> [--hours N]   # keyboard unit
 
-# Step 2 — push: pipe the composed to-do-card JSON to stdin; dedups (seen) + writes type=todo pending + delivers the chat digest
-echo '<todo-card-json>' | node scripts/brainstorming.js push
+# Step 2 — push: pipe the composed to-do-card JSON to stdin; dedups (seen) + writes type=todo pending + delivers the chat digest.
+# Include the fetch payload's `sessions` and `tz` alongside the card so push can
+# stamp the card's start_at/end_at from the source session's times.
+echo '{"card": <todo-card-json>, "sessions": <fetch.sessions>, "tz": "<fetch.tz>"}' | node scripts/brainstorming.js push
 ```
 
 ## Workflow
@@ -91,8 +95,16 @@ emits one to-do-card JSON object.
    it; if absent, the template is used). `icon` defaults to `🧠`; `subtitle` defaults
    to `Brainstorm` / `Brainstorm · N sessions`.
 
-3. **Push** — pipe the card JSON into `node scripts/brainstorming.js <userId> push`. The script:
+3. **Push** — pipe `{"card": <card>, "sessions": <fetch.sessions>, "tz": "<fetch.tz>"}`
+   into `node scripts/brainstorming.js <userId> push` (a bare card object still
+   works — the card then just carries no dates). The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
+   - stamps the item's **optional** `start_at`/`end_at` journal window from the
+     source session's `started_at`/`ended_at` (earliest session by `started_at`
+     among the card's `source_refs`, that **same** session's `ended_at`),
+     serialized as **naive LOCAL wall-clock** in the resolved tz — the
+     calendar-extractor convention. Missing/malformed session times ⇒ the fields
+     are omitted entirely (never invented),
    - validates + writes the **new** card to `POST /api/skill/data` with
      `type="todo"`, `merge="upsert"`, `status="pending"`, and
      `payload = { icon, title, subtitle?, prompt, source_refs[] }` (icon/title/prompt
@@ -105,8 +117,9 @@ emits one to-do-card JSON object.
 
 ## The ready-to-paste prompt (the per-skill `payload.prompt`)
 
-`push` composes this from the card's bracketed fields; the rest is literal. This is
-what **Confirm** copies to the clipboard:
+`push` composes this from the card's bracketed fields; the rest is literal. It
+stays on the card payload and in the chat digest — the handoff path is the Agent
+Chat session opened by tapping the card:
 
 ```
 I want to <GOAL — e.g. introduce Javis to the OpenClaw community, for non-engineer users>.
@@ -124,7 +137,7 @@ Run the content-brainstorming flow: ask me clarifying questions one at a time,
 inventory the source material, then produce a structured brief before drafting.
 ```
 
-This closes the loop: the openclaw `brainstorming` skill hands off to the Claude-side
+This closes the loop: the openclaw `javis-brainstorming` skill hands off to the Claude-side
 `content-brainstorming` skill, with `javis_mcp` pulling the source transcript.
 
 ## How this skill is invoked
@@ -138,7 +151,7 @@ This skill has **two triggers** (dispatcher auto-run and manual).
    route matches, the server claims run-once (`DispatchRouteExecuted (user, unit,
    route)`) and **AUTO-RUNS this skill directly — there is no approve-to-run proposal
    card**. It runs in the user's container with a prompt of the form
-   `Run /brainstorming for <unit>. Deliverable: …`, where the deliverable text is the
+   `Run /javis-brainstorming for <unit>. Deliverable: …`, where the deliverable text is the
    dispatcher's classification carried as an **advisory HINT**. The agent parses
    `<unit>` (`audio:<session_id>` or `kbd:<keyboard_input.id>`), runs
    `fetch --session <id>` / `fetch --kbd-input <id>`, composes the card, and pushes it.
@@ -156,12 +169,17 @@ also carries the **general** to-do card contract shared by all to-do-emitting sk
 
 - **Runtime dependencies** — the scripts use Node 18+ built-ins only (`fetch`, `fs`, `path`); no `npm install` is needed for the script runtime.
 - **Does no brainstorming.** This skill detects + composes + writes a card. The actual
-  brainstorming happens on Claude when the user taps **Confirm** (which copies
-  `payload.prompt`) and pastes it into the interactive `content-brainstorming` flow.
-- **The card is written PENDING.** The row mirrored to `/api/skill/data` carries
-  `status: "pending"`; iOS renders it dashed (purple accent) in the Calendar tab with
-  **Confirm · Discard**. **Confirm** copies `payload.prompt` to the clipboard and marks
-  the row confirmed; **Discard** deletes it. There is no approve-to-run proposal card.
+  brainstorming happens on Claude — tap the card to open its Agent Chat session
+  (which carries the digest and `payload.prompt`) and continue into the interactive
+  `content-brainstorming` flow.
+- **The card is written PENDING, with a journal window.** The row mirrored to
+  `/api/skill/data` carries `status: "pending"` plus optional `start_at`/`end_at`
+  stamped from the source session's times; iOS renders pending cards dashed (purple
+  accent), pinned to **today** regardless of date, with **Confirm · Discard**.
+  **Confirm** marks the row confirmed and the card stays on the calendar as a solid
+  event at its `start_at` day (undated legacy cards stay pinned to today);
+  **Discard** deletes it. Tapping the card body opens its Agent Chat session — tap
+  never confirms, Confirm never navigates. There is no approve-to-run proposal card.
 - **Chat digest, not a thin nudge.** A novel card also delivers a markdown digest of
   itself via `POST /api/agent/push` (calendar-extractor style): the Agent Chat shows a
   `[push:javis-brainstorming]` bubble followed by the card summary. Delivery is
@@ -177,9 +195,11 @@ also carries the **general** to-do card contract shared by all to-do-emitting sk
   mirror. The to-do `dedup_key` is `title|hash(goal)` — re-brainstorming the same unit
   toward a new goal is a genuinely new card.
 - **Timezone**: there is **no prefs file**. tz resolves in order: the `tz` field on the
-  fetch payload → the `TZ` environment variable → the system zone. To-do rows carry
-  **no date** (`start_at`/`end_at` absent), so the anchor is informational only — it
-  lets the agent resolve "today" coherently if the goal references it.
+  push/fetch payload → the `TZ` environment variable → the system zone. The resolved
+  tz is used twice: for the relative-date anchor (so the agent resolves "today"
+  coherently) and to serialize the card's optional `start_at`/`end_at` as **naive
+  LOCAL wall-clock** (`"YYYY-MM-DDTHH:mm:ss"`, no `Z`/offset — the
+  calendar-extractor convention; iOS reads zoneless strings in the device tz).
 - **The shared write side.** `scripts/todo-card.js` is the reusable Layer-1 helper:
   any future skill can `require` it to build + POST a `type="todo"` card without
   re-implementing the contract. `brainstorming.js` is its first consumer.

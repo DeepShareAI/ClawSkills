@@ -8,8 +8,8 @@ This document specifies **two** things:
    instead of re-documenting it. The reusable write side lives in
    `scripts/todo-card.js`.
 2. **The `brainstorm` route contract** — what the javis-server session-dispatcher
-   control-plane must satisfy to auto-run the `brainstorming` skill (the first
-   consumer of the surface).
+   control-plane must satisfy to auto-run the `javis-brainstorming` skill (the
+   first consumer of the surface).
 
 See the design spec:
 `docs/superpowers/specs/2026-06-09-brainstorming-skill-design.md`.
@@ -34,6 +34,8 @@ POST /api/skill/data
     "dedup_key": "<stable-key>",
     "status": "pending",
     "source_ref": "<session_id>",
+    "start_at": "2026-06-09T12:05:00",
+    "end_at": "2026-06-09T12:30:00",
     "payload": {
       "icon": "🧠",
       "title": "Intro Javis to the OpenClaw community",
@@ -52,19 +54,40 @@ Payload field rules (enforced by `scripts/todo-card.js → buildTodoPayload`):
 | `icon` | **yes** | shown on the card (emoji or SF symbol name) |
 | `title` | **yes** | the card's one-line heading |
 | `subtitle` | no | optional one-liner meta line |
-| `prompt` | **yes** | the ready-to-paste Claude prompt — **copied to the clipboard on Confirm** |
+| `prompt` | **yes** | the ready-to-paste Claude prompt — the hand-off text carried by the card and its chat digest |
 | `source_refs` | no (defaults `[]`) | session_id(s) the card derives from |
 
-`prompt` is the **only behavioral field**: every to-do card is a "Claude handoff"
-whose Confirm copies that prompt. The `(user, skill, type, dedup_key)` unique key
-keeps each skill's rows isolated.
+`prompt` is the **behavioral payload** of the handoff: it stays on the card and in
+the chat digest so the user (or the Agent Chat session reached by tapping the card)
+always has the ready-to-paste hand-off text. The `(user, skill, type, dedup_key)`
+unique key keeps each skill's rows isolated.
 
-### 1b. **type="todo" rows carry NO date**
+### 1b. **type="todo" dates are OPTIONAL (journal semantics)**
 
-`start_at` / `end_at` are intentionally **absent** (NULL on the server). To-do cards
-are not calendar events — they sort to today/top in the iOS Calendar list precisely
-because they have no date. The shared writer (`todo-card.js`) never emits `start_at` /
-`end_at` for a `type="todo"` item.
+`start_at` / `end_at` MAY be set on a `type="todo"` **item** (they were previously
+forbidden; payload-level dates are still dropped — dates live next to `dedup_key` /
+`status`, exactly where `type="event"` rows carry them).
+
+- **Format:** naive **LOCAL wall-clock** strings — `"YYYY-MM-DDTHH:mm:ss"`, **no
+  `Z`, no offset** — in the user's resolved tz, exactly the calendar-extractor
+  convention (`calendar-extractor/scripts/lib.js → toNaiveLocal`). iOS interprets
+  a zoneless string in the device timezone; a UTC `Z` instant would shift by the
+  tz offset (e.g. `2026-06-06T04:00:00.000Z` @ `America/Los_Angeles` must be
+  written as `2026-06-05T21:00:00`).
+- **Semantics are a journal window, not a deadline:** the window is the source
+  session's `started_at`/`ended_at` — the card lands on the day the idea was
+  captured. With multiple `source_refs`, use the **earliest** `started_at` and
+  that **same** session's `ended_at` (`brainstorming/scripts/lib.js →
+  sessionWindow`).
+- **Rendering:** **pending** to-dos still pin to **today's** section on iOS
+  regardless of date (dashed, Confirm/Discard). A **confirmed** to-do **with** a
+  date renders as a solid calendar event in its `start_at` day section, showing
+  the start–end time range. A confirmed to-do **without** a date (legacy rows)
+  renders solid but stays pinned to today.
+- **Never invent dates.** The shared writer (`todo-card.js → buildTodoItem`)
+  emits `start_at`/`end_at` only when the caller supplies them (and rejects
+  zoned/non-conforming strings); when the source times are missing or malformed
+  the fields are **omitted entirely** and the card degrades to the dateless path.
 
 ### 1c. Server fetch behavior (the one general tweak)
 
@@ -76,9 +99,9 @@ because they have no date. The shared writer (`todo-card.js`) never emits `start
   (`skill` stays required there).
 - **Null `start_at` rows MUST be returned.** The current GET filters
   `start_at >= win_from AND start_at < win_to`, which **excludes** rows whose
-  `start_at IS NULL` — i.e. every to-do. For `type=todo` the server MUST skip the
-  `start_at` window (or include rows where `start_at IS NULL`), or no to-do ever
-  returns.
+  `start_at IS NULL` — i.e. every undated to-do (dates are OPTIONAL per §1b, so
+  dateless rows remain a first-class case). For `type=todo` the server skips the
+  `start_at` window entirely, so both dated and dateless to-dos always return.
 - **Each returned row carries its own `skill`** so iOS can confirm/discard per row
   across skills. (Add a per-item `skill` field — the top-level `skill` alone is not
   enough once rows span multiple skills.)
@@ -91,9 +114,10 @@ list whenever `type=="todo"`.
 | Element | Behavior |
 |---|---|
 | Fetch | `GET /api/skill/data?type=todo` (skill omitted, Clerk JWT); refresh on any `skill_data_updated` SSE with `type=="todo"` |
-| Placement | **Inline** in the existing **Calendar** list, interleaved with event rows; `todo` rows have no date, so they sort to today/top |
+| Placement | **Inline** in the existing **Calendar** list, interleaved with event rows; **pending** `todo` rows pin to today/top regardless of date; **confirmed** rows with a `start_at` move to that day's section (§1b) |
 | Card face | calendar-style (dashed pending, purple accent): `payload.icon` + skill badge + `payload.title` + `payload.subtitle` meta line + a **Confirm / Discard** row. Driven entirely by `payload` — no per-skill code |
-| **Confirm** | (1) `UIPasteboard.general.string = payload.prompt` → toast "copied — paste into Claude"; (2) `POST /api/skill/data/confirm` with the row's `skill` / `type` / `dedup_key` (status → confirmed). The prompt rides on Confirm — no separate copy button |
+| **Tap (card body)** | opens the Agent Chat session containing the card's digest (latest session whose `skill` matches the row's). Tap never confirms |
+| **Confirm** | `POST /api/skill/data/confirm` with the row's `skill` / `type` / `dedup_key` (status → confirmed). The card **stays** on the calendar, restyled as a solid confirmed event (no clipboard write, no toast). Confirm never navigates |
 | **Discard** | `POST /api/skill/data/discard` with the row's `skill` / `type` / `dedup_key` (row deleted) |
 
 Confirm/discard endpoints are **unchanged** — they already target a row by
@@ -102,29 +126,33 @@ Confirm/discard endpoints are **unchanged** — they already target a row by
 ### 1e. Extension point (YAGNI — not built now)
 
 If a future to-do ever needs a non-handoff action (e.g. an in-app "Send"), add an
-optional `payload.action` discriminator; absence means the default "copy prompt"
-behavior. Not implemented until a real second action exists.
+optional `payload.action` discriminator; absence means the default behavior
+(Confirm saves, tap opens the chat). Not implemented until a real second action
+exists.
 
 ---
 
 ## Part 2 — The `brainstorm` route contract (for the javis-server team)
 
 The interface the javis-server session-dispatcher must satisfy so it can route
-brainstorm-worthy deliverables to the `brainstorming` skill. The contract is also
-declared, discoverably, in `SKILL.md`'s `metadata.routes` block.
+brainstorm-worthy deliverables to the `javis-brainstorming` skill. The contract is
+also declared, discoverably, in `SKILL.md`'s `metadata.routes` block.
 
 ### 2a. RouteRegistry row
 
-Seed this row per user, enabling it when the user enables `brainstorming`:
+Seed this row per user, enabling it when the user enables `javis-brainstorming`.
+The `skill` value MUST equal the published slug `javis-brainstorming` —
+javis-server's `route_registry_service` skips any declared route whose `skill`
+differs from the installing slug, and the dispatcher triggers `/<slug>`:
 
 | column | value |
 |---|---|
 | `route_id` | `"brainstorm"` |
-| `skill` | `"brainstorming"` |
+| `skill` | `"javis-brainstorming"` |
 | `matches` | `"ideation, help me organize my thoughts, presentation/deck planning, turn this into a brief, brainstorm, structure these ideas"` |
 | `args_template` | `null` (the unit + the prepended SKILL.md carry everything the skill needs) |
 | `risk` | `"low"` (read-only transcript fetch + a best-effort to-do write; no destructive side effects) |
-| `enabled` | set `true` when the user enables brainstorming; `false`/absent otherwise |
+| `enabled` | set `true` when the user enables `javis-brainstorming`; `false`/absent otherwise |
 
 The dispatcher only routes a deliverable to this skill when an **enabled** row with
 `route_id="brainstorm"` exists for that user.
@@ -154,7 +182,7 @@ The skill relies only on the `<unit>` being present and `_UNIT_RE`-valid in the 
 prompt — which the generic dispatcher prompt already provides:
 
 ```
-Run /brainstorming for <unit>. Deliverable: <title>. <description>
+Run /javis-brainstorming for <unit>. Deliverable: <title>. <description>
 Fetch that unit's transcript, compose the to-do card, and write it.
 ```
 
@@ -175,6 +203,6 @@ written twice across overlapping manual windows or a re-run.
 - Relax `GET /api/skill/data` so `skill` is optional when `type=todo`, return rows
   where `start_at IS NULL`, and carry per-row `skill` (Part 1c).
 - Seed/enable the `RouteRegistry` row for `brainstorm` when a user enables
-  brainstorming.
+  `javis-brainstorming`.
 - Feed the enabled route catalog (`route_id` + `matches`) into the
   `classify_and_route` task prompt.

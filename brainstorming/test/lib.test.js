@@ -8,6 +8,7 @@ const {
   resolveTz,
   toNaiveLocal,
   localAnchor,
+  sessionWindow,
   todoDedupKey,
   composePrompt,
   formatDigest,
@@ -44,7 +45,7 @@ test('resolveTz prefers the payload tz, then TZ env, then the system zone', () =
   }
 });
 
-// ---- localAnchor (informational; to-do rows carry no date) ---------------
+// ---- naive-local wall-clock (anchor + journal-window serialization) ------
 test('toNaiveLocal renders the instant as naive wall-clock in tz (no Z)', () => {
   assert.equal(toNaiveLocal('2026-06-06T04:00:00.000Z', 'America/Los_Angeles'), '2026-06-05T21:00:00');
   assert.doesNotMatch(toNaiveLocal('2026-06-06T04:00:00.000Z', 'America/Los_Angeles'), /[Z+]/);
@@ -60,6 +61,84 @@ test('localAnchor emits a local wall-clock anchor whose date is the tz-local "to
   assert.doesNotMatch(a.reference_time, /Z$/);
   assert.equal(a.reference_weekday, 'Thursday');
   assert.equal(a.reference_time_utc, '2026-06-05T04:11:00.000Z');
+});
+
+// ---- sessionWindow: the source-session journal window ---------------------
+const TZ = 'America/Los_Angeles';
+
+test('sessionWindow serializes the source session times as naive-local in tz', () => {
+  const sessions = [
+    { session_id: 's1', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z' },
+  ];
+  // 19:05Z / 19:30Z == 12:05 / 12:30 PDT — the journal window the spec shows.
+  assert.deepEqual(sessionWindow(sessions, ['s1'], TZ), {
+    start_at: '2026-06-09T12:05:00',
+    end_at: '2026-06-09T12:30:00',
+  });
+  assert.doesNotMatch(sessionWindow(sessions, ['s1'], TZ).start_at, /[Z+]/);
+});
+
+test('sessionWindow with multiple source_refs picks the EARLIEST session and that SAME session\'s ended_at', () => {
+  const sessions = [
+    { session_id: 'late', started_at: '2026-06-09T22:00:00.000Z', ended_at: '2026-06-09T23:00:00.000Z' },
+    { session_id: 'early', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z' },
+    { session_id: 'unrelated', started_at: '2026-06-09T01:00:00.000Z', ended_at: '2026-06-09T02:00:00.000Z' },
+  ];
+  // 'unrelated' is earlier still but NOT among the refs — must be ignored.
+  assert.deepEqual(sessionWindow(sessions, ['late', 'early'], TZ), {
+    start_at: '2026-06-09T12:05:00',
+    end_at: '2026-06-09T12:30:00', // the EARLY session's end, not the late one's
+  });
+});
+
+test('sessionWindow omits both fields when no source session has a usable started_at', () => {
+  assert.deepEqual(sessionWindow([], ['s1'], TZ), {});
+  assert.deepEqual(sessionWindow(null, ['s1'], TZ), {});
+  assert.deepEqual(sessionWindow([{ session_id: 's1' }], ['s1'], TZ), {});
+  assert.deepEqual(sessionWindow([{ session_id: 's1', started_at: 'not-a-date' }], ['s1'], TZ), {});
+  // Non-finite numerics are unusable — skipped.
+  assert.deepEqual(sessionWindow([{ session_id: 's1', started_at: NaN, ended_at: NaN }], ['s1'], TZ), {});
+  // No refs at all -> no window (we never guess a session).
+  assert.deepEqual(sessionWindow([{ session_id: 's1', started_at: '2026-06-09T19:05:00Z' }], [], TZ), {});
+});
+
+test('sessionWindow accepts NUMERIC epoch seconds (the live javis-server wire contract)', () => {
+  // javis-server emits started_at/ended_at as Optional[float] epoch seconds
+  // (UTC instants) for BOTH audio and keyboard sessions on the two endpoints
+  // this skill fetches. 1781031900 == 2026-06-09T19:05:00Z == 12:05 PDT.
+  const sessions = [
+    { session_id: 's1', started_at: 1781031900, ended_at: 1781033400 },
+  ];
+  assert.deepEqual(sessionWindow(sessions, ['s1'], TZ), {
+    start_at: '2026-06-09T12:05:00',
+    end_at: '2026-06-09T12:30:00',
+  });
+  // Fractional epoch seconds (server floats) and mixed numeric/string sessions
+  // both resolve; earliest-numeric wins over a later ISO session.
+  const mixed = [
+    { session_id: 'late', started_at: '2026-06-09T22:00:00.000Z', ended_at: '2026-06-09T23:00:00.000Z' },
+    { session_id: 'early', started_at: 1781031900.25, ended_at: 1781033400.75 },
+  ];
+  assert.deepEqual(sessionWindow(mixed, ['late', 'early'], TZ), {
+    start_at: '2026-06-09T12:05:00',
+    end_at: '2026-06-09T12:30:00',
+  });
+});
+
+test('sessionWindow keeps start_at and omits only end_at when ended_at is missing/malformed', () => {
+  const noEnd = sessionWindow(
+    [{ session_id: 's1', started_at: '2026-06-09T19:05:00.000Z' }], ['s1'], TZ);
+  assert.deepEqual(noEnd, { start_at: '2026-06-09T12:05:00' });
+  const badEnd = sessionWindow(
+    [{ session_id: 's1', started_at: '2026-06-09T19:05:00.000Z', ended_at: 'garbage' }], ['s1'], TZ);
+  assert.deepEqual(badEnd, { start_at: '2026-06-09T12:05:00' });
+});
+
+test('sessionWindow matches sessions by session_id or id', () => {
+  const viaId = sessionWindow(
+    [{ id: 's1', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z' }],
+    ['s1'], TZ);
+  assert.equal(viaId.start_at, '2026-06-09T12:05:00');
 });
 
 // ---- todoDedupKey --------------------------------------------------------
@@ -108,7 +187,7 @@ test('composePrompt degrades gracefully with no requests and no source_refs', ()
 });
 
 // ---- formatDigest: Agent Chat markdown -----------------------------------
-const DIGEST_FOOTER = '✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.';
+const DIGEST_FOOTER = '✅ **Confirm** in the Calendar tab saves it to your calendar · **Discard** drops it · tap the card anytime to reopen this chat.';
 
 test('formatDigest renders the full calendar-style digest for a complete card', () => {
   const md = formatDigest({

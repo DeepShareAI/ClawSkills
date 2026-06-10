@@ -182,7 +182,8 @@ test('doPush writes one type=todo pending item, delivers the digest, and records
   assert.equal(item.payload.icon, '🧠');
   assert.equal(item.payload.title, SAMPLE_CARD.title);
   assert.match(item.payload.prompt, /content-brainstorming flow/);
-  assert.ok(!('start_at' in item), 'to-do row carries no date');
+  assert.ok(!('start_at' in item), 'no journal window without session times (never invented)');
+  assert.ok(!('end_at' in item), 'no journal window without session times (never invented)');
   // doPush hands the UNMODIFIED normalized card through the digest seam; what
   // pushDigest renders from it is pinned by the fetch-stub tests below.
   assert.equal(client.calls.digest.length, 1);
@@ -265,7 +266,7 @@ test('pushDigest POSTs {skill: slug, content: formatDigest(card)} to /api/agent/
       '  - 📋 an attention hook · a step-by-step demo/onboarding flow',
       '  - 📡 2 sessions',
       '',
-      '✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.',
+      '✅ **Confirm** in the Calendar tab saves it to your calendar · **Discard** drops it · tap the card anytime to reopen this chat.',
     ].join('\n'));
   });
 });
@@ -276,6 +277,80 @@ test('pushDigest throws with the HTTP status on a non-ok response', async () => 
       () => pushDigest('tok-1', normalizeCard(SAMPLE_CARD)),
       /POST \/api\/agent\/push -> HTTP 502/);
   });
+});
+
+// ---- push: the start_at/end_at journal window -----------------------------
+// Spec 2026-06-10 (brainstorm card tap-and-confirm): push stamps the item's
+// OPTIONAL start_at/end_at from the SOURCE session's started_at/ended_at —
+// earliest session by started_at among the card's source_refs, that SAME
+// session's ended_at — serialized naive-local in the resolved tz (the
+// calendar-extractor convention). Missing/malformed times => fields omitted.
+test('doPush stamps start_at/end_at from the source session times, naive-local in tz', async () => {
+  const client = makeClient();
+  const store = makeStore({ userId: 'self' });
+  const sessions = [
+    { session_id: 'sess-1', source: 'audio', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z' },
+  ];
+  const card = normalizeCard({ ...SAMPLE_CARD, source_refs: ['sess-1'] });
+
+  await captureLogs(() =>
+    doPush({ token: 't', client, card, sessions, tz: TZ, ...store, now: NOW }));
+
+  const [item] = client.calls.write[0];
+  // 19:05Z/19:30Z @ America/Los_Angeles == the 12:05–12:30 PM journal window.
+  assert.equal(item.start_at, '2026-06-09T12:05:00');
+  assert.equal(item.end_at, '2026-06-09T12:30:00');
+  assert.doesNotMatch(item.start_at, /[Z+]/, 'naive LOCAL wall-clock — no zone designator');
+  assert.equal(item.status, 'pending');
+  assert.ok(!('start_at' in item.payload), 'dates are item-level, never payload-level');
+});
+
+test('doPush with multiple source_refs uses the earliest session and that SAME session\'s ended_at', async () => {
+  const client = makeClient();
+  const store = makeStore({ userId: 'self' });
+  const sessions = [
+    { session_id: 'sess-2', source: 'audio', started_at: '2026-06-09T22:00:00.000Z', ended_at: '2026-06-09T23:00:00.000Z' },
+    { session_id: 'sess-1', source: 'audio', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z' },
+  ];
+
+  await captureLogs(() =>
+    doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), sessions, tz: TZ, ...store, now: NOW }));
+
+  const [item] = client.calls.write[0];
+  assert.equal(item.start_at, '2026-06-09T12:05:00', 'earliest started_at wins');
+  assert.equal(item.end_at, '2026-06-09T12:30:00', 'the earliest session\'s OWN end, not the later one\'s');
+});
+
+test('doPush omits start_at/end_at entirely when session times are missing or malformed', async () => {
+  for (const sessions of [
+    [],                                                            // no sessions piped at all
+    [{ session_id: 'sess-1', source: 'audio' }],                   // no started_at
+    [{ session_id: 'sess-1', started_at: 'not-a-date' }],          // malformed started_at
+    [{ session_id: 'other', started_at: '2026-06-09T19:05:00Z' }], // no ref match
+  ]) {
+    const client = makeClient();
+    const store = makeStore({ userId: 'self' });
+    await captureLogs(() =>
+      doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), sessions, tz: TZ, ...store, now: NOW }));
+    const [item] = client.calls.write[0];
+    assert.ok(!('start_at' in item), `omitted for ${JSON.stringify(sessions)}`);
+    assert.ok(!('end_at' in item), `omitted for ${JSON.stringify(sessions)}`);
+  }
+});
+
+test('doPush keeps start_at and omits only end_at when the source session has no usable ended_at', async () => {
+  const client = makeClient();
+  const store = makeStore({ userId: 'self' });
+  const sessions = [
+    { session_id: 'sess-1', source: 'audio', started_at: '2026-06-09T19:05:00.000Z' },
+  ];
+
+  await captureLogs(() =>
+    doPush({ token: 't', client, card: normalizeCard(SAMPLE_CARD), sessions, tz: TZ, ...store, now: NOW }));
+
+  const [item] = client.calls.write[0];
+  assert.equal(item.start_at, '2026-06-09T12:05:00');
+  assert.ok(!('end_at' in item));
 });
 
 test('doPush does NOT write per-unit gating state (server owns run-once)', async () => {

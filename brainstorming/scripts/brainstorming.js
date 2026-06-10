@@ -25,6 +25,11 @@
  *          then deliver a markdown digest of the card via /api/agent/push (NON-FATAL
  *          — the summary line reports delivered / FAILED). The skill does NOT
  *          self-gate per unit — the server owns run-once (DispatchRouteExecuted).
+ *          When the stdin JSON also carries the fetch payload's `sessions` (and
+ *          `tz`), push stamps the item's OPTIONAL start_at/end_at journal window
+ *          from the source session's started_at/ended_at — earliest session by
+ *          started_at among the card's source_refs, serialized naive-local in tz
+ *          (calendar-extractor convention). Missing/malformed times => omitted.
  *
  * Usage:
  *   node brainstorming.js <userId> fetch [--hours N] [--limit N]
@@ -52,6 +57,7 @@ const { resolveUserId, safeUserPath, readJson, writeJson } = require('./data');
 const {
   resolveTz,
   localAnchor,
+  sessionWindow,
   todoDedupKey,
   composePrompt,
   formatDigest,
@@ -170,8 +176,9 @@ async function doFetch(opts = {}, deps = {}) {
   const payloadTz = 'tz' in opts ? opts.tz : (deps.tz != null ? deps.tz : base.tz);
   const tz = resolveTz(payloadTz);
 
-  // The relative-date anchor is informational here (to-do rows carry no date),
-  // but it lets the agent resolve "today" coherently if the goal references it.
+  // The relative-date anchor lets the agent resolve "today" coherently if the
+  // goal references it; the sessions' started_at/ended_at are what `push` later
+  // stamps as the card's optional start_at/end_at journal window.
   const out = { ...localAnchor(nowIso, tz), tz, ...base, sessions };
   if (deps.emit) deps.emit(out);
   else console.log(JSON.stringify(out, null, 2));
@@ -226,8 +233,12 @@ function defaultSubtitle(sourceRefs) {
   return n > 1 ? `Brainstorm · ${n} sessions` : 'Brainstorm';
 }
 
-// Read + parse the stdin to-do-card JSON (a single object, or {card:{…}}).
-async function readStdinCard() {
+// Read + parse the stdin push JSON: a single card object, or an envelope
+// {card:{…}, sessions?:[…], tz?:"…"}. `sessions` (the fetch payload's
+// sessions[], or at least the {session_id, started_at, ended_at} of the card's
+// source_refs) and `tz` may ride either on the envelope or on the card itself;
+// they feed the optional start_at/end_at stamping and are otherwise ignored.
+async function readStdinPush() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   input = input.trim();
@@ -238,7 +249,11 @@ async function readStdinCard() {
   catch (e) { throw new Error(`stdin is not valid JSON: ${e.message}`); }
 
   const raw = parsed && parsed.card && typeof parsed.card === 'object' ? parsed.card : parsed;
-  return normalizeCard(raw);
+  const sessions = Array.isArray(parsed && parsed.sessions)
+    ? parsed.sessions
+    : (raw && Array.isArray(raw.sessions) ? raw.sessions : []);
+  const tz = (parsed && parsed.tz) || (raw && raw.tz) || null;
+  return { card: normalizeCard(raw), sessions, tz };
 }
 
 // Deliver the Agent Chat digest of a novel card: iOS renders the slug as a
@@ -270,7 +285,10 @@ async function doPush(deps = {}) {
   const load = deps.load || loadState;
   const save = deps.save || saveState;
   const token = deps.token || requireToken();
-  const card = 'card' in deps ? deps.card : await readStdinCard();
+  const stdin = 'card' in deps ? null : await readStdinPush();
+  const card = 'card' in deps ? deps.card : stdin.card;
+  const sessions = 'sessions' in deps ? deps.sessions : (stdin ? stdin.sessions : []);
+  const tz = resolveTz('tz' in deps ? deps.tz : (stdin ? stdin.tz : null));
   const digest = deps.digest !== undefined ? deps.digest : true;
 
   const state = load();
@@ -295,10 +313,17 @@ async function doPush(deps = {}) {
     return;
   }
 
-  // Build the validated type="todo" item (icon/title/prompt REQUIRED).
+  // Build the validated type="todo" item (icon/title/prompt REQUIRED). The
+  // OPTIONAL start_at/end_at journal window comes from the source session's
+  // times (earliest session among source_refs, naive-local in tz); when the
+  // session times are missing/malformed, sessionWindow returns {} and the
+  // fields are omitted entirely — never invented.
+  const { start_at, end_at } = sessionWindow(sessions, card.source_refs, tz);
   const item = buildTodoItem({
     dedupKey: card.dedupKey,
     sourceRef: card.sourceRef,
+    startAt: start_at,
+    endAt: end_at,
     payload: {
       icon: card.icon,
       title: card.title,

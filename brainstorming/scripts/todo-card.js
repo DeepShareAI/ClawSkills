@@ -6,7 +6,8 @@
  * ANY openclaw skill that cannot finish its job in the container and needs to
  * hand off to interactive Claude (+ javis_mcp) writes a `type="todo"` skill_data
  * row with a small fixed payload. iOS renders it generically as a calendar-style
- * card with Confirm / Discard; Confirm copies `payload.prompt` to the clipboard.
+ * card with Confirm / Discard; Confirm saves the card on the calendar, tapping
+ * the card body opens its Agent Chat session (the handoff path).
  *
  * This module is dependency-free (Node 18+ builtins only) and importable by
  * future skills — it owns the to-do payload CONTRACT so each skill only fills the
@@ -19,11 +20,15 @@
  *
  * The row is written to POST /api/skill/data with:
  *   { skill, type:"todo", merge:"upsert", items:[{ dedup_key, status:"pending",
- *     source_ref, payload }] }
+ *     source_ref, start_at?, end_at?, payload }] }
  *
- * type="todo" rows carry NO date — start_at/end_at are intentionally absent
- * (NULL on the server). The GET side returns them with skill OPTIONAL when
- * type=todo. See references/todo-card-contract.md.
+ * type="todo" rows MAY carry an OPTIONAL item-level start_at/end_at journal
+ * window (naive LOCAL wall-clock "YYYY-MM-DDTHH:mm:ss" in the user's tz — the
+ * calendar-extractor convention; NO Z, NO offset). The caller supplies them
+ * (e.g. from the source session's times); this module never invents dates and
+ * rejects zoned strings. Absent dates stay absent (NULL on the server). The
+ * GET side returns todo rows with skill OPTIONAL. See
+ * references/todo-card-contract.md.
  */
 'use strict';
 
@@ -58,18 +63,45 @@ function strOrEmpty(v) {
   return (v == null ? '' : String(v)).trim();
 }
 
+// OPTIONAL item-level dates must already be naive LOCAL wall-clock (the
+// calendar-extractor convention iOS decodes in the device tz). Reject zoned or
+// otherwise non-conforming strings instead of silently re-introducing the
+// "UTC instant read as local" bug class. Seconds are optional on input.
+const NAIVE_LOCAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
+
+function naiveLocalOrNull(v, field) {
+  const s = strOrEmpty(v);
+  if (!s) return null;
+  if (!NAIVE_LOCAL_RE.test(s)) {
+    throw new Error(
+      `to-do ${field} must be naive LOCAL wall-clock "YYYY-MM-DDTHH:mm:ss" (no Z/offset), got "${s}"`
+    );
+  }
+  return s;
+}
+
 // Build one POST /api/skill/data item from a validated payload. `dedup_key` and
 // `source_ref` come from the caller (the skill decides identity); status is
 // always "pending" so the row renders dashed with Confirm/Discard until acted on.
-function buildTodoItem({ dedupKey, payload, sourceRef }) {
+// `startAt`/`endAt` are an OPTIONAL passthrough journal window (never invented
+// here): start_at is emitted only when the caller supplies it, and end_at only
+// alongside a start_at — an end without a start is not a coherent window.
+function buildTodoItem({ dedupKey, payload, sourceRef, startAt, endAt }) {
   if (!dedupKey || !String(dedupKey).trim()) throw new Error('buildTodoItem requires a dedup_key');
   const validated = buildTodoPayload(payload);
-  return {
+  const item = {
     dedup_key: String(dedupKey).trim().slice(0, 512),
     status: 'pending',
     source_ref: sourceRef != null && String(sourceRef).trim() ? String(sourceRef).trim() : null,
     payload: validated,
   };
+  const start = naiveLocalOrNull(startAt, 'start_at');
+  if (start) {
+    item.start_at = start;
+    const end = naiveLocalOrNull(endAt, 'end_at');
+    if (end) item.end_at = end;
+  }
+  return item;
 }
 
 // POST a batch of to-do items to the server skill_data store. IO-injectable so

@@ -3,7 +3,9 @@
 // Tests for scripts/todo-card.js — the shared write side of the general to-do
 // card surface (Layer 1). The payload contract is the load-bearing piece:
 // icon/title/prompt are REQUIRED; subtitle is optional; source_refs defaults [].
-// type="todo" rows carry NO date (no start_at/end_at).
+// Item-level start_at/end_at are an OPTIONAL passthrough (naive LOCAL
+// wall-clock, calendar-extractor convention) — never invented, and payload-level
+// dates are still dropped.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -39,7 +41,7 @@ test('buildTodoPayload keeps the fixed contract shape and drops extras', () => {
     prompt: '  paste me into Claude ',
     source_refs: ['  s1 ', '', 's2'],
     bogus: 'should be dropped',
-    start_at: '2026-06-06T00:00:00Z', // to-do rows carry NO date — must be dropped
+    start_at: '2026-06-06T00:00:00Z', // dates live at ITEM level, never in payload — must be dropped
   });
   assert.deepEqual(payload, {
     icon: '🧠',
@@ -49,7 +51,7 @@ test('buildTodoPayload keeps the fixed contract shape and drops extras', () => {
     source_refs: ['s1', 's2'],
   });
   assert.ok(!('bogus' in payload));
-  assert.ok(!('start_at' in payload), 'to-do payload must carry no date');
+  assert.ok(!('start_at' in payload), 'dates are item-level, never payload-level');
 });
 
 test('buildTodoPayload makes subtitle optional and source_refs default to []', () => {
@@ -61,8 +63,8 @@ test('buildTodoPayload makes subtitle optional and source_refs default to []', (
   assert.deepEqual(one.source_refs, ['sess-1']);
 });
 
-// ---- buildTodoItem: pending status + no date -----------------------------
-test('buildTodoItem requires a dedup_key and emits status=pending with no date', () => {
+// ---- buildTodoItem: pending status + optional dates ----------------------
+test('buildTodoItem requires a dedup_key and emits status=pending; dates absent when not supplied', () => {
   assert.throws(() => buildTodoItem({ payload: { icon: '🧠', title: 't', prompt: 'p' } }), /dedup_key/);
   const item = buildTodoItem({
     dedupKey: 'intro-javis|abc123',
@@ -72,14 +74,64 @@ test('buildTodoItem requires a dedup_key and emits status=pending with no date',
   assert.equal(item.dedup_key, 'intro-javis|abc123');
   assert.equal(item.status, 'pending');
   assert.equal(item.source_ref, 'sess-1');
-  assert.ok(!('start_at' in item), 'to-do item carries no start_at');
-  assert.ok(!('end_at' in item), 'to-do item carries no end_at');
+  assert.ok(!('start_at' in item), 'no start_at unless the caller supplies one (never invented)');
+  assert.ok(!('end_at' in item), 'no end_at unless the caller supplies one (never invented)');
   assert.equal(item.payload.prompt, 'p');
 });
 
 test('buildTodoItem nulls an absent source_ref', () => {
   const item = buildTodoItem({ dedupKey: 'k', payload: { icon: '🧠', title: 't', prompt: 'p' } });
   assert.equal(item.source_ref, null);
+});
+
+test('buildTodoItem passes a supplied naive-local start_at/end_at through verbatim', () => {
+  const item = buildTodoItem({
+    dedupKey: 'k',
+    payload: { icon: '🧠', title: 't', prompt: 'p' },
+    startAt: '2026-06-09T12:05:00',
+    endAt: '2026-06-09T12:30:00',
+  });
+  assert.equal(item.start_at, '2026-06-09T12:05:00');
+  assert.equal(item.end_at, '2026-06-09T12:30:00');
+});
+
+test('buildTodoItem emits start_at alone when end_at is absent, and drops end_at without a start_at', () => {
+  const startOnly = buildTodoItem({
+    dedupKey: 'k',
+    payload: { icon: '🧠', title: 't', prompt: 'p' },
+    startAt: '2026-06-09T12:05:00',
+  });
+  assert.equal(startOnly.start_at, '2026-06-09T12:05:00');
+  assert.ok(!('end_at' in startOnly));
+
+  // An end without a start is not a coherent window — dropped, not invented.
+  const endOnly = buildTodoItem({
+    dedupKey: 'k',
+    payload: { icon: '🧠', title: 't', prompt: 'p' },
+    endAt: '2026-06-09T12:30:00',
+  });
+  assert.ok(!('start_at' in endOnly));
+  assert.ok(!('end_at' in endOnly));
+});
+
+test('buildTodoItem rejects zoned/non-naive date strings (the UTC-read-as-local bug class)', () => {
+  const payload = { icon: '🧠', title: 't', prompt: 'p' };
+  assert.throws(
+    () => buildTodoItem({ dedupKey: 'k', payload, startAt: '2026-06-06T04:00:00.000Z' }),
+    /naive LOCAL wall-clock/);
+  assert.throws(
+    () => buildTodoItem({ dedupKey: 'k', payload, startAt: '2026-06-06T04:00:00+02:00' }),
+    /naive LOCAL wall-clock/);
+  assert.throws(
+    () => buildTodoItem({
+      dedupKey: 'k', payload,
+      startAt: '2026-06-09T12:05:00', endAt: '2026-06-09T19:30:00Z',
+    }),
+    /end_at/);
+  // Blank/whitespace dates are treated as absent, not an error.
+  const blank = buildTodoItem({ dedupKey: 'k', payload, startAt: '  ', endAt: '' });
+  assert.ok(!('start_at' in blank));
+  assert.ok(!('end_at' in blank));
 });
 
 // ---- postTodoCards: POST shape (injected http) ---------------------------

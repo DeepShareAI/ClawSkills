@@ -10,6 +10,7 @@ const {
   localAnchor,
   todoDedupKey,
   composePrompt,
+  formatDigest,
   pruneSeen,
 } = require('../scripts/lib');
 
@@ -104,6 +105,85 @@ test('composePrompt degrades gracefully with no requests and no source_refs', ()
   // Falls back to a placeholder source hint and a generic bullet.
   assert.match(prompt, /session_id\(s\): \(see my recent voice notes\)/);
   assert.match(prompt, /^- a structured brief I can act on$/m);
+});
+
+// ---- formatDigest: Agent Chat markdown -----------------------------------
+const DIGEST_FOOTER = '✅ **Confirm** in the Calendar tab copies the ready-to-paste Claude prompt · **Discard** drops it.';
+
+test('formatDigest renders the full calendar-style digest for a complete card', () => {
+  const md = formatDigest({
+    icon: '🧠',
+    title: 'Intro Javis to the OpenClaw community',
+    goal: 'introduce Javis to the OpenClaw community, for non-engineer users',
+    request: ['an attention hook', 'a step-by-step demo/onboarding flow'],
+    source_refs: ['sess-aaa', 'sess-bbb'],
+  });
+  assert.equal(md, [
+    '## 🧠 Brainstorm — new card / 新腦力激盪',
+    '',
+    '- **Intro Javis to the OpenClaw community**',
+    '  - 🎯 introduce Javis to the OpenClaw community, for non-engineer users',
+    '  - 📋 an attention hook · a step-by-step demo/onboarding flow',
+    '  - 📡 2 sessions',
+    '',
+    DIGEST_FOOTER,
+  ].join('\n'));
+});
+
+test('formatDigest omits the 🎯 line for a goal-less card', () => {
+  const md = formatDigest({ title: 'T', goal: '', request: ['r1'], source_refs: ['s1'] });
+  assert.doesNotMatch(md, /🎯/);
+  assert.match(md, /^ {2}- 📋 r1$/m);
+});
+
+test('formatDigest omits the 📋 line for a request-less card', () => {
+  const md = formatDigest({ title: 'T', goal: 'g', request: [], source_refs: ['s1'] });
+  assert.doesNotMatch(md, /📋/);
+  assert.match(md, /^ {2}- 🎯 g$/m);
+});
+
+test('formatDigest pluralizes the 📡 session count and omits it at zero refs', () => {
+  assert.doesNotMatch(formatDigest({ title: 'T', source_refs: [] }), /📡/);
+  assert.match(formatDigest({ title: 'T', source_refs: ['a'] }), /^ {2}- 📡 1 session$/m);
+  assert.match(formatDigest({ title: 'T', source_refs: ['a', 'b', 'c'] }), /^ {2}- 📡 3 sessions$/m);
+});
+
+test('formatDigest uses the card icon in the header when the agent overrode it', () => {
+  assert.match(formatDigest({ title: 'T', icon: '🎨' }), /^## 🎨 Brainstorm — new card \/ 新腦力激盪$/m);
+  // No override -> the default 🧠.
+  assert.match(formatDigest({ title: 'T' }), /^## 🧠 Brainstorm — new card \/ 新腦力激盪$/m);
+});
+
+test('formatDigest collapses interior newlines in title/goal/request so multi-line LLM text cannot break the digest markdown', () => {
+  const md = formatDigest({
+    title: 'Line1\nLine2',
+    goal: 'goal A\n## fake header',
+    request: ['item\none', 'item\ttwo'],
+    source_refs: ['s1'],
+  });
+  assert.equal(md, [
+    '## 🧠 Brainstorm — new card / 新腦力激盪',
+    '',
+    '- **Line1 Line2**',
+    '  - 🎯 goal A ## fake header',
+    '  - 📋 item one · item two',
+    '  - 📡 1 session',
+    '',
+    DIGEST_FOOTER,
+  ].join('\n'));
+  // No injected column-0 header line beyond the fixed digest header.
+  assert.equal(md.split('\n').filter((l) => l.startsWith('## ')).length, 1);
+});
+
+test('formatDigest header and footer are fixed even on a bare card', () => {
+  const md = formatDigest({ title: 'Bare' });
+  assert.equal(md, [
+    '## 🧠 Brainstorm — new card / 新腦力激盪',
+    '',
+    '- **Bare**',
+    '',
+    DIGEST_FOOTER,
+  ].join('\n'));
 });
 
 // ---- pruning by TTL ------------------------------------------------------

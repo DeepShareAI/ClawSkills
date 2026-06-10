@@ -1,6 +1,6 @@
 ---
 name: javis-brainstorming
-description: Turn a brainstorm-worthy voice/keyboard unit into a generic "to-do card" whose ready-to-paste prompt hands off to Claude's content-brainstorming skill (with javis_mcp pulling the source transcript). This skill does NO brainstorming itself — it composes a hand-off prompt and writes a type="todo" card. Use on demand when the user asks to "brainstorm this" / "整理成簡報" / "帮我腦力激盪", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the brainstorm route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; the card is written PENDING and the human gate is Confirm/Discard in the iOS Calendar tab (Confirm copies the card's prompt into the clipboard to paste into Claude). Triggers: 'brainstorm this', '整理成簡報', '帮我腦力激盪'.
+description: Turn a brainstorm-worthy voice/keyboard unit into a generic "to-do card" whose ready-to-paste prompt hands off to Claude's content-brainstorming skill (with javis_mcp pulling the source transcript). This skill does NO brainstorming itself — it composes a hand-off prompt and writes a type="todo" card. Use on demand when the user asks to "brainstorm this" / "整理成簡報" / "帮我腦力激盪", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the brainstorm route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; the card is written PENDING and a markdown digest of it is delivered to the Agent Chat via POST /api/agent/push (the chat shows [push:javis-brainstorming] + the card summary); the human gate is Confirm/Discard in the iOS Calendar tab (Confirm copies the card's prompt into the clipboard to paste into Claude). Triggers: 'brainstorm this', '整理成簡報', '帮我腦力激盪'.
 keywords: brainstorm this, brainstorm, 整理成簡報, 帮我腦力激盪, content-brainstorming, todo card, brainstorming
 metadata:
   openclaw:
@@ -46,7 +46,7 @@ node scripts/brainstorming.js fetch [--hours N] [--limit N]
 node scripts/brainstorming.js fetch --session <sessionId> [--hours N]   # audio unit
 node scripts/brainstorming.js fetch --kbd-input <inputId> [--hours N]   # keyboard unit
 
-# Step 2 — push: pipe the composed to-do-card JSON to stdin; dedups (seen) + writes type=todo pending
+# Step 2 — push: pipe the composed to-do-card JSON to stdin; dedups (seen) + writes type=todo pending + delivers the chat digest
 echo '<todo-card-json>' | node scripts/brainstorming.js push
 ```
 
@@ -97,8 +97,11 @@ emits one to-do-card JSON object.
      `type="todo"`, `merge="upsert"`, `status="pending"`, and
      `payload = { icon, title, subtitle?, prompt, source_refs[] }` (icon/title/prompt
      **required**) — see `references/todo-card-contract.md` for the general contract,
-   - optionally posts a tiny `POST /api/agent/push` nudge so the user notices the new
-     card in the Calendar tab.
+   - delivers a markdown digest of the card via `POST /api/agent/push`
+     (calendar-extractor style), so the Agent Chat shows `[push:javis-brainstorming]`
+     + the card summary (title, 🎯 goal, 📋 request items, 📡 session count,
+     Confirm/Discard footer). The digest is non-fatal — the summary line reports
+     `Chat digest: delivered.` or `Chat digest FAILED: <reason>`.
 
 ## The ready-to-paste prompt (the per-skill `payload.prompt`)
 
@@ -159,6 +162,14 @@ also carries the **general** to-do card contract shared by all to-do-emitting sk
   `status: "pending"`; iOS renders it dashed (purple accent) in the Calendar tab with
   **Confirm · Discard**. **Confirm** copies `payload.prompt` to the clipboard and marks
   the row confirmed; **Discard** deletes it. There is no approve-to-run proposal card.
+- **Chat digest, not a thin nudge.** A novel card also delivers a markdown digest of
+  itself via `POST /api/agent/push` (calendar-extractor style): the Agent Chat shows a
+  `[push:javis-brainstorming]` bubble followed by the card summary. Delivery is
+  non-fatal — the push summary line reports `Chat digest: delivered.` or
+  `Chat digest FAILED: <reason>` so failures are diagnosable from the run log.
+- **Backgrounded/killed iOS app**: `AGENT_PUSH` is WebSocket-only (no APNs), so a
+  backgrounded or killed app misses the chat message — the pending card in the
+  Calendar tab is the durable artifact.
 - **Dedup is local-state-authoritative.** The container's gateway token can WRITE to
   `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk
   JWT), so novelty is decided by the local `seen` map (`{ "<dedup_key>": "<ts>" }` in

@@ -130,6 +130,32 @@ optional `payload.action` discriminator; absence means the default behavior
 (Confirm saves, tap opens the chat). Not implemented until a real second action
 exists.
 
+### 1f. Per-card Agent Chat session — pass `dedup_key` on `/api/agent/push`
+
+When a to-do-emitting skill delivers a card's chat digest, it **SHOULD** include
+the card's `dedup_key` on the push:
+
+```json
+POST /api/agent/push
+{
+  "skill": "<skill-name>",
+  "content": "<markdown digest>",
+  "dedup_key": "<the SAME stable key written to the type=todo row>"
+}
+```
+
+This is the one irreducible per-skill convention for per-card sessions. With it,
+javis-server derives a **deterministic per-card session** from
+`(user, skill, dedup_key)` so the digest lands in — and tapping the card reopens —
+that card's **own** Agent Chat session, and a later update to the same card
+(same `dedup_key`) appends to it. Omitting `dedup_key` falls back to the legacy
+per-skill rolling session (every card's digest funnels into one thread).
+
+The derivation is **server-owned** (single source of truth): the skill computes
+**no** session id and stamps **no** payload — it only forwards the `dedup_key`
+it already computed for the card row. See
+`docs/superpowers/specs/2026-06-17-per-card-agent-session-design.md`.
+
 ---
 
 ## Part 2 — The `brainstorm` route contract (for the javis-server team)

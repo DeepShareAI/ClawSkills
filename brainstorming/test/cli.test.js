@@ -244,7 +244,7 @@ test('doPush can suppress the digest', async () => {
 // These exercise the production pushDigest (not the injected test seam) via a
 // stubbed global fetch, so a regression in the {skill, content} body — e.g.
 // reverting to the old generic nudge string or dropping the slug — fails here.
-test('pushDigest POSTs {skill: slug, content: formatDigest(card)} to /api/agent/push', async () => {
+test('pushDigest POSTs {skill: slug, content: formatDigest(card), dedup_key} to /api/agent/push', async () => {
   const card = normalizeCard(SAMPLE_CARD);
   await withFetchStub(async () => ({ ok: true }), async (calls) => {
     await pushDigest('tok-1', card);
@@ -254,8 +254,11 @@ test('pushDigest POSTs {skill: slug, content: formatDigest(card)} to /api/agent/
     assert.equal(calls[0].opts.headers.Authorization, 'Bearer tok-1');
     assert.equal(calls[0].opts.headers['Content-Type'], 'application/json');
     const body = JSON.parse(calls[0].opts.body);
-    assert.deepEqual(Object.keys(body).sort(), ['content', 'skill']);
+    assert.deepEqual(Object.keys(body).sort(), ['content', 'dedup_key', 'skill']);
     assert.equal(body.skill, 'javis-brainstorming');
+    // The card's dedup_key rides on the push so javis-server derives a
+    // deterministic per-card Agent Chat session (user, skill, dedup_key).
+    assert.equal(body.dedup_key, card.dedupKey);
     // Expected content written out independently (NOT computed via formatDigest)
     // so this assertion can actually fail if the digest content regresses.
     assert.equal(body.content, [
@@ -268,6 +271,16 @@ test('pushDigest POSTs {skill: slug, content: formatDigest(card)} to /api/agent/
       '',
       '✅ **Confirm** in the Calendar tab saves it to your calendar · **Discard** drops it · tap the card anytime to reopen this chat.',
     ].join('\n'));
+  });
+});
+
+test('pushDigest forwards an explicit card dedup_key verbatim (per-card session key)', async () => {
+  const card = normalizeCard({ ...SAMPLE_CARD, dedup_key: 'fixed-card-key' });
+  assert.equal(card.dedupKey, 'fixed-card-key');
+  await withFetchStub(async () => ({ ok: true }), async (calls) => {
+    await pushDigest('tok-1', card);
+    const body = JSON.parse(calls[0].opts.body);
+    assert.equal(body.dedup_key, 'fixed-card-key');
   });
 });
 

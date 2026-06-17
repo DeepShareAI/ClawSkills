@@ -47,7 +47,8 @@
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key; type=todo)
- *   POST /api/agent/push          (get_gateway_user; {skill, content})  — chat digest
+ *   POST /api/agent/push          (get_gateway_user; {skill, content, dedup_key})  — chat digest
+ *                                  (dedup_key → server-derived per-card Agent Chat session)
  */
 'use strict';
 
@@ -259,11 +260,18 @@ async function readStdinPush() {
 // Deliver the Agent Chat digest of a novel card: iOS renders the slug as a
 // `[push:javis-brainstorming]` user bubble and the formatDigest(card) markdown
 // (calendar-extractor style) as the Javis message.
+//
+// `dedup_key` is the card's stable key (the SAME value written to the type="todo"
+// row). javis-server derives a deterministic per-card Agent Chat session from
+// (user, skill, dedup_key), so each card's digest lands in — and re-tapping the
+// card reopens — its OWN session instead of one rolling per-skill thread. The
+// derivation is server-owned (single source of truth); the skill only forwards
+// the key it already computed (see references/todo-card-contract.md §1f).
 async function pushDigest(token, card) {
   const res = await fetch(`${SERVER}/api/agent/push`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skill: SLUG, content: formatDigest(card) }),
+    body: JSON.stringify({ skill: SLUG, content: formatDigest(card), dedup_key: card.dedupKey }),
   });
   if (!res.ok) throw new Error(`POST /api/agent/push -> HTTP ${res.status}`);
 }

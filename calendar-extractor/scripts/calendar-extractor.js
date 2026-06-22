@@ -237,11 +237,37 @@ function formatDigest(events, tz) {
   return lines.join('\n');
 }
 
-async function pushToiOS(token, content) {
+// Per-card markdown for ONE event — the section heading plus that event's
+// details, reusing formatDigest's per-event formatting. Each card is pushed on
+// its own /api/agent/push (with the event's dedup_key) so the server routes it
+// into that card's own Agent Chat session (derive_card_session_id), giving every
+// calendar event its own iOS chat thread instead of one combined digest.
+function formatCardPush(ev, tz) {
+  const lines = ['## 📅 Calendar — new meeting / 新会议', ''];
+  let when = ev.startAt
+    ? new Date(ev.startAt).toLocaleString('en-US', { timeZone: tz })
+    : 'time TBD';
+  if (ev.startAt && ev.endAt) {
+    when += ` – ${new Date(ev.endAt).toLocaleTimeString('en-US', { timeZone: tz })}`;
+  }
+  lines.push(`- **${ev.title}**`);
+  lines.push(`  - 🕘 ${when}`);
+  if (ev.location) lines.push(`  - 📍 ${ev.location}`);
+  if (ev.attendees.length) lines.push(`  - 👥 ${ev.attendees.join(', ')}`);
+  if (ev.notes) lines.push(`  - 📝 ${ev.notes}`);
+  return lines.join('\n');
+}
+
+async function pushToiOS(token, content, dedupKey) {
+  // dedup_key is included ONLY when provided: a no-key call must stay
+  // byte-identical to the legacy aggregate body. When present, the server routes
+  // the push into the card's own Agent Chat session (no explicit session_id).
+  const body = { skill: SLUG, content };
+  if (dedupKey) body.dedup_key = dedupKey;
   const res = await fetch(`${SERVER}/api/agent/push`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skill: SLUG, content }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST /api/agent/push -> HTTP ${res.status}`);
 }
@@ -273,7 +299,7 @@ async function mirrorToSkillData(token, events, tz) {
 // normalized events so a test can assert exactly which events hit the table.
 const defaultPushClient = {
   mirror: (token, events, tz) => mirrorToSkillData(token, events, tz),
-  push: (token, content) => pushToiOS(token, content),
+  push: (token, content, dedupKey) => pushToiOS(token, content, dedupKey),
 };
 
 // Read + parse + normalize the stdin events array.
@@ -331,8 +357,13 @@ async function doPush(deps = {}) {
   try { await client.mirror(token, freshEvents, tz); }
   catch (e) { console.error('⚠️ skill_data mirror failed (non-fatal):', e.message); }
 
-  const content = formatDigest(freshEvents, tz);
-  await client.push(token, content);
+  // One push per fresh event, each carrying that event's dedup_key (key ===
+  // dedupKey(ev), the same string written to its skill_data row). The server
+  // routes each into the card's own Agent Chat session, so every calendar event
+  // lands in its own iOS thread — replacing the single aggregate digest.
+  for (const f of fresh) {
+    await client.push(token, formatCardPush(f.ev, tz), f.key);
+  }
 
   for (const f of fresh) seen[f.key] = nowIso;
   state.seen = seen;
@@ -359,6 +390,7 @@ module.exports = {
   sessionSource,
   sessionId,
   formatDigest,
+  formatCardPush,
 };
 
 if (require.main === module) {

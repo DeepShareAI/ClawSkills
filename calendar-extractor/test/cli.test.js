@@ -20,15 +20,17 @@ const {
   doPush,
   resolveTz,
 } = require('../scripts/calendar-extractor');
+const { dedupKey } = require('../scripts/lib');
 
 // A recording push client: captures every mirror() (table write) and push()
-// (iOS digest) call so a test can assert exactly what hit each endpoint.
+// (iOS per-card delivery) call so a test can assert exactly what hit each
+// endpoint. push now receives a per-event dedupKey (the per-card session key).
 function makeClient() {
   const calls = { mirror: [], push: [] };
   return {
     calls,
     mirror: async (_token, events) => { calls.mirror.push(events); },
-    push: async (_token, content) => { calls.push.push(content); },
+    push: async (_token, content, dedupKey) => { calls.push.push({ content, dedupKey }); },
   };
 }
 
@@ -184,7 +186,7 @@ test('doFetch resolves tz via the payload envelope when no override is supplied'
 });
 
 // ---- push: event-level dedup via `seen` ----------------------------------
-test('doPush writes table, pushes iOS, and records each event in `seen`', async () => {
+test('doPush writes table, pushes one per-card message per event, and records each event in `seen`', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });
   const events = [{ title: 'Standup', startAt: '2026-06-04T17:00:00.000Z', endAt: null,
@@ -194,10 +196,39 @@ test('doPush writes table, pushes iOS, and records each event in `seen`', async 
 
   assert.equal(client.calls.mirror.length, 1);
   assert.deepEqual(client.calls.mirror[0], events);
+  // One push per fresh event, each carrying that event's dedup_key (per-card
+  // Agent Chat session key — the same string written to its skill_data row).
   assert.equal(client.calls.push.length, 1);
+  assert.equal(client.calls.push[0].dedupKey, dedupKey(events[0]));
+  assert.match(client.calls.push[0].content, /Standup/);
   // The event is recorded in `seen` (the only local dedup; no extractedUnits).
   assert.equal(Object.keys(store.box.state.seen).length, 1);
   assert.ok(!store.box.state.extractedUnits, 'no per-unit gating state is written');
+});
+
+test('doPush sends N per-card pushes for N fresh events, each with its own dedup_key', async () => {
+  const client = makeClient();
+  const store = makeStore({ userId: 'self' });
+  const events = [
+    { title: 'Standup', startAt: '2026-06-04T17:00:00.000Z', endAt: null,
+      location: 'Room A', attendees: ['Sam'], notes: null, sourceRef: 'sid-1', sourceKind: 'audio' },
+    { title: 'Design Review', startAt: '2026-06-04T20:00:00.000Z', endAt: '2026-06-04T21:00:00.000Z',
+      location: null, attendees: [], notes: 'bring laptop', sourceRef: 'sid-2', sourceKind: 'audio' },
+    { title: 'Dinner', startAt: '2026-06-05T01:00:00.000Z', endAt: null,
+      location: 'The new place', attendees: ['Alex'], notes: null, sourceRef: 'sid-3', sourceKind: 'audio' },
+  ];
+
+  await doPush({ token: 't', client, events, ...store, tz: TZ, now: NOW });
+
+  // One push per fresh event — no single aggregate digest.
+  assert.equal(client.calls.push.length, events.length);
+  for (let i = 0; i < events.length; i++) {
+    assert.equal(client.calls.push[i].dedupKey, dedupKey(events[i]),
+      'each push carries the matching event dedup_key');
+    assert.match(client.calls.push[i].content, new RegExp(events[i].title));
+  }
+  // Each card stands alone: no push contains another event's title.
+  assert.doesNotMatch(client.calls.push[0].content, /Design Review|Dinner/);
 });
 
 test('doPush dedups: an already-seen event is not re-mirrored or re-pushed', async () => {
@@ -230,11 +261,14 @@ test('doPush only delivers the NEW events when mixing seen and fresh', async () 
   await doPush({ token: 't', client, events: [seenEv], ...store, tz: TZ, now: NOW });
   await doPush({ token: 't', client, events: [seenEv, freshEv], ...store, tz: TZ, now: NOW });
 
-  // Second push mirrors + pushes ONLY the fresh event.
+  // Second push mirrors + delivers ONLY the fresh event as its own per-card
+  // message, carrying that event's dedup_key.
   assert.equal(client.calls.mirror.length, 2);
   assert.deepEqual(client.calls.mirror[1], [freshEv]);
-  assert.match(client.calls.push[1], /New/);
-  assert.doesNotMatch(client.calls.push[1], /Old/);
+  assert.equal(client.calls.push.length, 2);
+  assert.equal(client.calls.push[1].dedupKey, dedupKey(freshEv));
+  assert.match(client.calls.push[1].content, /New/);
+  assert.doesNotMatch(client.calls.push[1].content, /Old/);
 });
 
 test('doPush with an empty events array pushes nothing (empty-fetch path)', async () => {

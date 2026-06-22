@@ -1,6 +1,6 @@
 ---
 name: calendar-extractor
-description: Extract calendar events from recent recording and keyboard transcripts and push a markdown digest to your iOS chat. Use on demand when the user asks for "today's meetings" / "calendar extract" / "今日会议" / "提取日历", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the calendar route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; extracted events are written PENDING and become solid only when the user taps Confirm in the iOS calendar table. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.
+description: Extract calendar events from recent recording and keyboard transcripts and push them to your iOS chat as one markdown card per event, each landing in its own Agent Chat thread. Use on demand when the user asks for "today's meetings" / "calendar extract" / "今日会议" / "提取日历", and fetch the last 24 hours of transcript data by default. The javis-server session dispatcher also AUTO-RUNS this skill (no approve-to-run card) when a completed unit matches the calendar route, passing a deliverable hint in the run prompt that the agent may use alongside the transcript; extracted events are written PENDING and become solid only when the user taps Confirm in the iOS calendar table. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Triggers: 'today's meetings', 'calendar extract', '今日会议', '提取日历'.
 keywords: today's meetings, calendar extract, 今日会议, 提取日历, calendar-extractor
 metadata:
   openclaw:
@@ -16,7 +16,7 @@ metadata:
 
 # Calendar Extractor
 
-> Extract calendar events from recent recording and keyboard transcripts and push a markdown digest to your iOS chat. Fetch the last 24 hours of transcript data by default. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Generate one digest per local day in the user's timezone, containing all events that occur on reference_date and any events explicitly mentioned as happening today.
+> Extract calendar events from recent recording and keyboard transcripts and push them to your iOS chat — one markdown card per event, each landing in its own Agent Chat thread. Fetch the last 24 hours of transcript data by default. If the user asks for "today's meetings", use the local day defined by the fetched reference_date field. Generate one digest per local day in the user's timezone, containing all events that occur on reference_date and any events explicitly mentioned as happening today.
 
 ## When to use
 
@@ -77,8 +77,11 @@ reads the fetched transcripts and emits a JSON array of events.
 3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
    - best-effort mirrors the **new** events to `POST /api/skill/data` (upsert by `dedup_key`) **tagged `status: "pending"`** so the server stores them pending and the iOS calendar table shows them greyed/dashed with **Confirm · Discard** — an event becomes solid only when the user taps **Confirm** (Discard deletes it),
-   - formats the **new** events as a markdown digest and delivers it via
-     `POST http://javis-server:8000/api/agent/push` with `{"skill": "calendar-extractor", "content": "<markdown>"}` (the digest is informational and unchanged — it is not a confirmation gate).
+   - delivers the **new** events **per card** — one `POST http://javis-server:8000/api/agent/push`
+     per event, each `{"skill": "calendar-extractor", "content": "<markdown>", "dedup_key": "<event dedup_key>"}`.
+     The server routes each push (carrying its `dedup_key`, no explicit `session_id`) into that card's
+     own Agent Chat session, so **every event lands in its own iOS chat thread** instead of one combined
+     digest. The pushes are informational — they are not a confirmation gate.
 
 ## How this skill is invoked
 
@@ -135,7 +138,7 @@ The route contract the javis-server team must satisfy (RouteRegistry row,
   the same way.
 - **Markdown, not native cards.** A push delivers a `content` string rendered as markdown on iOS
   (`MDBlock`). Native `EventList`/`EventCard` blocks are emitted only during a live SSE agent turn
-  (`_maybe_emit_chat_block`), not via the push path — so the digest is rich markdown by design.
+  (`_maybe_emit_chat_block`), not via the push path — so each per-card push is rich markdown by design.
 - **User IDs** only allow letters, digits, `-`, `_` (path-traversal guard in `data.js`).
 - **Backgrounded/killed iOS app**: `AGENT_PUSH` is WebSocket-only (no APNs). For mission-critical
   delivery, add a Telegram channel as backup.

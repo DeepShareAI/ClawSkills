@@ -19,7 +19,7 @@ If any of those sound like you, this one's for you.
 
 HiJavis listens to your conversations and meetings. Calendar Extractor reads back through your recent recordings and spots anything that sounds like a plan or appointment, such as "let's meet Tuesday at 3," "dinner Saturday at the new place," or "call me tomorrow afternoon."
 
-Then it hands you a clean list in your chat, with each event's title, date, time, place, who's involved, and any notes it picked up.
+Then it sends each event to your chat as its own card — with the title, date, time, place, who's involved, and any notes it picked up. Every event opens in its own chat thread, so you can act on one plan without losing the rest.
 
 ## How to use it
 
@@ -43,7 +43,8 @@ Want it to come to you? Ask HiJavis to send a summary on a schedule. By default 
 
 - **It gets how you talk about time.** You don't say "March 14th at 2:00 PM" out loud. You say "tomorrow," "next Thursday," "around 6," "noon." Calendar Extractor turns all of that into a real date and time in your time zone.
 - **It's instant.** The moment a recording or a typed note finishes, it pulls out any plans right then, so your list is ready before you even ask.
-- **It never repeats itself.** It remembers what it already showed you, so the same event won't clutter your list twice.
+- **One card per plan.** Each event arrives as its own card in its own chat thread, so they never pile into one wall of text and you can deal with them one at a time.
+- **It never repeats itself.** It remembers what it already showed you, so the same event won't clutter your chat twice.
 - **It works in English and Chinese.** It keeps up smoothly with both.
 
 ## Real-life examples

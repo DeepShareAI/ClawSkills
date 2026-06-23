@@ -14,7 +14,7 @@ Supporting changes:
 - New `defaultPushClient.upsert` seam so tests can record the exact item posted without hitting the network.
 - New helpers: `buildUpdateItem`, `patchIsEmpty`, `patchTimeToNaiveLocal` (with `NAIVE_LOCAL_RE`), `readStdinUpdate`, `doUpdate`, `doAnchor` — exported for unit tests.
 - **SKILL.md**: new "Editing a pushed card in-thread" section (read `[CURRENT CARD]` → run `anchor` → resolve/null-not-guess → merge into a full patch → `update` with verbatim key), documented auto-confirm semantics, and `update`/`anchor` added to the Core commands block (including the explicit `<userId>` form).
-- **package.json**: already at `0.5.0` on this branch — no bump needed in this changeset.
+- **package.json**: `0.5.0 → 0.5.1` (new `update`/`anchor` capability).
 
 Files:
 - `calendar-extractor/scripts/calendar-extractor.js` (+208/−13)

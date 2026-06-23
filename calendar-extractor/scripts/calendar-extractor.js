@@ -43,11 +43,13 @@
  *   OPENCLAW_GATEWAY_TOKEN  required for fetch/push/update — Bearer auth to javis-server
  *                           (injected automatically inside the openclaw container)
  *   JAVIS_SERVER_URL        optional — defaults to http://javis-server:8000
- *   TZ                      optional — IANA zone used as a LAST resort. Edit turns
- *                           (`update` via stdin `tz`, `anchor` via `--tz`) prefer the
- *                           explicit [CURRENT CARD] zone, then the server's authoritative
- *                           zone (transcripts envelope), then TZ env -> system. The
- *                           server step matters: the prod container TZ is empty (UTC).
+ *   TZ                      optional — IANA zone used as a LAST resort. push and the
+ *                           edit turns (`update` via stdin `tz`, `anchor` via `--tz`)
+ *                           prefer the explicit [CURRENT CARD] zone, then the server's
+ *                           authoritative zone (transcripts envelope), then TZ env ->
+ *                           system. The server step matters: the prod container TZ is
+ *                           empty (UTC), which would stamp the UTC instant instead of
+ *                           the user's naive-local wall-clock and land cards a day off.
  *
  * Verified endpoints (javis-server):
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
@@ -415,8 +417,16 @@ async function doPush(deps = {}) {
   const client = deps.client || defaultPushClient;
   const load = deps.load || loadState;
   const save = deps.save || saveState;
-  const tz = deps.tz || resolveTz(null);
   const token = deps.token || requireToken();
+  // Zone for the naive-local skill_data times. Resolve it the SAME way the edit
+  // path does (resolveUserTz): explicit deps.tz (tests) -> the server's
+  // authoritative zone (the /transcripts/recent envelope, fetched with `token`)
+  // -> TZ env -> system. The server step is load-bearing: the prod openclaw
+  // container's TZ env is EMPTY -> resolveTz(null) returns UTC, which stored the
+  // UTC INSTANT instead of the user's wall-clock and landed the card on the wrong
+  // day/time. token MUST be resolved before this line (resolveUserTz fetches the
+  // server zone with it).
+  const tz = deps.tz || await resolveUserTz({ token, deps });
   const events = deps.events || await readStdinEvents();
 
   const state = load();

@@ -319,9 +319,9 @@ test('doUpdate never calls the iOS push path (only the skill_data upsert)', asyn
 });
 
 // ---- anchor output shape (the five fields, no sessions) ------------------
-test('doAnchor prints only the anchor (five fields + tz), no sessions', () => {
+test('doAnchor prints only the anchor (five fields + tz), no sessions', async () => {
   let emitted;
-  doAnchor({ tz: TZ, now: NOW, emit: (o) => { emitted = o; } });
+  await doAnchor({ tz: TZ, now: NOW, emit: (o) => { emitted = o; } });
   assert.deepEqual(Object.keys(emitted).sort(), [
     'reference_date', 'reference_time', 'reference_time_utc', 'reference_weekday', 'tz',
   ]);
@@ -331,4 +331,68 @@ test('doAnchor prints only the anchor (five fields + tz), no sessions', () => {
   assert.equal(emitted.reference_time_utc, NOW());
   assert.equal(emitted.tz, TZ);
   assert.ok(!('sessions' in emitted), 'anchor carries no sessions / transcript');
+});
+
+// ---- THE TZ FIX: anchor resolves the user's zone, not the container's UTC ---
+// Reproduces the e2e finding: at 01:36 UTC (= 6:36 PM PDT on Jun 22) a BARE
+// anchor in a UTC container resolved "today" to Jun 23 and the edit landed a day
+// late. With the server's authoritative zone (injected via deps.fetchTz), "today"
+// is correctly Jun 22. deps.fetchTz overrides the network call so this is offline.
+const EVENING_UTC = () => '2026-06-23T01:36:00.000Z'; // 6:36 PM PDT, Jun 22
+
+test('doAnchor resolves "today" in the SERVER zone, not the container UTC (the off-by-one fix)', async () => {
+  let emitted;
+  await doAnchor({
+    now: EVENING_UTC,                              // no explicit tz on this turn
+    fetchTz: async () => 'America/Los_Angeles',    // the server's authoritative zone
+    token: 't',
+    emit: (o) => { emitted = o; },
+  });
+  assert.equal(emitted.tz, 'America/Los_Angeles');
+  assert.equal(emitted.reference_date, '2026-06-22', '"today" is the LOCAL day, not the UTC day (Jun 23)');
+  assert.equal(emitted.reference_time, '2026-06-22T18:36:00');
+});
+
+test('doAnchor: an explicit --tz / [CURRENT CARD] zone wins over the server lookup', async () => {
+  let emitted; let fetched = 0;
+  await doAnchor({
+    now: EVENING_UTC, tzFlag: 'America/New_York',
+    fetchTz: async () => { fetched++; return 'America/Los_Angeles'; },
+    token: 't', emit: (o) => { emitted = o; },
+  });
+  assert.equal(emitted.tz, 'America/New_York', 'explicit zone wins');
+  assert.equal(emitted.reference_date, '2026-06-22'); // 9:36 PM EDT, still Jun 22
+  assert.equal(fetched, 0, 'no server lookup when an explicit zone is supplied');
+});
+
+test('doAnchor falls back to TZ env when no explicit zone and the server lookup yields nothing', async () => {
+  const origTZ = process.env.TZ;
+  process.env.TZ = 'UTC';
+  try {
+    let emitted;
+    await doAnchor({
+      now: EVENING_UTC, fetchTz: async () => null, token: 't',
+      emit: (o) => { emitted = o; },
+    });
+    assert.equal(emitted.tz, 'UTC');
+    assert.equal(emitted.reference_date, '2026-06-23', 'UTC fallback keeps the documented (last-resort) behavior');
+  } finally {
+    if (origTZ === undefined) delete process.env.TZ; else process.env.TZ = origTZ;
+  }
+});
+
+// ---- update also resolves the server zone when the agent omits stdin tz ----
+test('doUpdate uses the SERVER zone when the patch carries no tz (no UTC day-shift)', async () => {
+  const client = makeClient();
+  await doUpdate({
+    token: 't', client,                            // no deps.tz
+    fetchTz: async () => 'America/Los_Angeles',     // server zone
+    input: {
+      dedup_key: ORIGINAL_KEY,                      // no stdin tz
+      patch: { title: 'Design Review', start_at: '2026-06-23T03:00:00.000Z' }, // 8pm PDT Jun 22
+    },
+  });
+  const [item] = client.calls.upsert[0];
+  assert.equal(item.start_at, '2026-06-22T20:00:00', 'Z instant collapses in the server zone (Jun 22 8pm), not UTC');
+  assert.doesNotMatch(item.start_at, /[Z+]/);
 });

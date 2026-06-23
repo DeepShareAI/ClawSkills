@@ -108,6 +108,12 @@ in place and confirms it** — no duplicate row, no Confirm tap. The agent drive
    the original fetch anchor is stale — resolve "today / 6 pm / tomorrow" against
    this fresh anchor (same date-resolution discipline as extraction: anchor on
    `reference_time`/`reference_date`, never your own "today").
+   - **The anchor's `tz` is the user's calendar zone.** `anchor` resolves it from
+     the server (the authoritative zone) — **not** the container's `TZ`, which is
+     empty/UTC in prod and would shift "today" forward a day west of UTC in the
+     evening. Pass `[CURRENT CARD]`'s `tz` as `--tz <IANA>` if it carries one;
+     otherwise a bare `anchor` already returns the correct zone. **Use the
+     `reference_date` it prints — do not compute "today" from a UTC clock.**
 3. **Resolve the correction; null-not-guess.** Resolve the user's change against
    the anchor and emit a full ISO 8601 instant **with the explicit `tz` UTC
    offset** (e.g. `2026-06-22T18:00:00-07:00`). If the change is ambiguous or
@@ -125,10 +131,12 @@ in place and confirms it** — no duplicate row, no Confirm tap. The agent drive
      value through unchanged — it will **not** re-interpret it in the runner's
      zone. (A time you *are* changing must be a full offset-bearing instant per
      step 3, so the script can collapse it correctly.)
-   - **Pass the card zone.** Include the card's `tz` (read it off the anchor /
-     `[CURRENT CARD]`) as a top-level `tz` so the script collapses any
-     offset-bearing changed time against the user's calendar zone, not the
-     container's process zone (which is not assumed equal).
+   - **Pass the card zone.** Include the card's `tz` (the value the `anchor` step
+     printed) as a top-level `tz` so the script collapses any offset-bearing
+     changed time against the user's calendar zone, not the container's process
+     zone (which is empty/UTC in prod, not the user's zone). If you omit `tz`,
+     `update` resolves the user's zone from the server itself — but passing the
+     anchor's `tz` is preferred (explicit, and avoids a second lookup).
 5. **Run `update` with the verbatim `dedup_key`.**
 
    ```bash
@@ -211,10 +219,16 @@ The route contract the javis-server team must satisfy (RouteRegistry row,
   local dedup is the event-level `seen` map (`{ "<event-key>": "<ts>" }` in
   `data/users/<userId>.json`, 30-day TTL-pruned). It keeps a duplicate event from re-reaching the
   table/chat across overlapping manual windows or a re-run.
-- **Timezone**: there is **no prefs file**. The skill resolves tz in order:
-  the `tz` field on the fetch payload → the `TZ` environment variable → the system zone
+- **Timezone**: there is **no prefs file**. On the `fetch`/extract path the skill resolves tz in
+  order: the `tz` field on the fetch payload → the `TZ` environment variable → the system zone
   (`Intl.DateTimeFormat().resolvedOptions().timeZone`). The manual and dispatcher paths resolve tz
-  the same way.
+  the same way. **Edit turns (`update`/`anchor`) have no fetch payload**, so they resolve:
+  explicit (`--tz` / stdin `tz` / `[CURRENT CARD]` tz) → **the server's authoritative zone**
+  (a best-effort `GET /api/transcripts/recent` reads the same `tz` field) → `TZ` env → system.
+  The server step exists because the prod per-user container has an **empty `TZ` (→ UTC)**, which
+  shifted "today" forward a day on evening edits west of UTC. The proper long-term fix is to put
+  the user's `tz` in the server's `[CURRENT CARD]` block and/or set `TZ` on the container — see
+  `docs/superpowers/specs/2026-06-22-calendar-edit-timezone-fix.md`.
 - **Markdown, not native cards.** A push delivers a `content` string rendered as markdown on iOS
   (`MDBlock`). Native `EventList`/`EventCard` blocks are emitted only during a live SSE agent turn
   (`_maybe_emit_chat_block`), not via the push path — so each per-card push is rich markdown by design.

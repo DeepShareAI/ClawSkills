@@ -23,20 +23,44 @@ view (and null-`start_at` rows aren't shown at all until a time is set). The iOS
 calendar rendering is correct (re-fetches on `skill_data_updated`, keys rows by stable
 id, re-sections by day) — there is no separate UI bug.
 
-## Root cause
+## Root cause — CORRECTED after a second device test (2026-06-23)
 
-The **extraction** path gets the user's `tz` from the `GET /api/transcripts/recent`
-envelope, so its dates are correct. The **edit** path (`anchor` + `update`) has no such
-envelope, and the per-user `openclaw-user-*` container runs with an **empty `TZ`
-environment → Node resolves to UTC**. So a bare `anchor` computed `reference_date`
-as the **UTC** date (June 23), and the agent resolved "today 8 pm" against it.
+> The first cut of this spec assumed the **extraction** path got a correct `tz` from the
+> `/api/transcripts/recent` envelope and only the **edit** path was broken. **That was
+> wrong.** A second end-to-end device test (running the deployed v0.5.2) proved the gap
+> is deeper and shared by **both** paths.
 
-Confirmed on the host:
-```
-$ docker exec openclaw-user-<hash> sh -c 'echo TZ=$TZ; node -e "console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)"'
-TZ=
-UTC
-```
+**The user's timezone never reaches the pipeline at all.** Verified on prod:
+
+- **No tz in the DB.** `users` (and every table) has **no timezone column**:
+  ```
+  select table_name, column_name from information_schema.columns
+   where column_name ilike '%timezone%' or column_name='tz';   -- (0 rows)
+  ```
+- **No tz in the transcripts envelope.** The raw response carries only `sessions`:
+  ```
+  GET /api/transcripts/recent → top-level keys: ['sessions'];  tz = None
+  ```
+  So `fetch`/extract reads `base.tz = undefined`, and `fetchServerTz` finds nothing.
+- **Container `TZ` is empty → Node resolves to UTC:**
+  ```
+  $ docker exec openclaw-user-<hash> sh -c 'echo TZ=$TZ; node -e "...timeZone"'
+  TZ= / UTC
+  ```
+- **Net effect:** in-container `anchor` returns `tz: "UTC"`, `reference_date: 2026-06-23`.
+  Both extraction AND edit resolve "today" in **UTC**. This is why the very first card
+  ever read *"start time (10:00 AM **UTC**) is inferred"* — it has always been UTC for
+  this user.
+
+So `start_at` landing on June **23** instead of June **22** is not an edit-path bug and
+not a container-only bug — **no layer knows the user is in `America/Los_Angeles`.**
+
+### Re-test result (v0.5.2 deployed)
+- ✅ Edit **mechanism** correct again: row `confirmed`, time → 20:00–21:00, single row,
+  `dedup_key` passed verbatim. The v0.5.2 `fetchServerTz` lookup **did fire**
+  (`GET …/transcripts/recent?…&limit=1` observed).
+- ❌ Date still June 23 — because the lookup has **nothing to read**. The v0.5.2 fix is
+  correct *plumbing* but **inert** until the server actually emits a tz.
 
 ## Fix — shipped (skill side)
 
@@ -44,45 +68,52 @@ ClawSkills `calendar-extractor` **v0.5.2** (`scripts/calendar-extractor.js`):
 
 - New `resolveUserTz({ explicitTz, token })` + `fetchServerTz(token)`. Edit-turn zone
   order is now: **explicit** (`--tz` / stdin `tz` / `[CURRENT CARD]` tz) → **the
-  server's authoritative zone** (best-effort `GET /api/transcripts/recent?limit=1`,
-  reading the same `tz` field extraction trusts) → `TZ` env → system.
+  server's zone** (best-effort `GET /api/transcripts/recent?limit=1`, reading a top-level
+  `tz` field — which the server **does not emit yet**, so this currently returns null)
+  → `TZ` env → system.
 - `doAnchor` is now async and applies this order (a bare `anchor` returns the user's
   real zone, not UTC). `doUpdate` applies it when the patch carries no `tz`.
 - `getFlag` guards the `require()` (test) path. SKILL.md edit-flow updated to use the
   `anchor`'s `reference_date` and pass `[CURRENT CARD]` tz when present.
-- Tests pin the fix: at `01:36Z` with server zone `America/Los_Angeles`, `anchor`'s
-  `reference_date` is **2026-06-22** (not 06-23); `update` collapses a `Z` instant in
-  the server zone. `node --test`: 51 pass / 0 fail.
+- **v0.5.3** adds a loud stderr warning when `resolveUserTz` falls back to **UTC** (no
+  explicit/[CURRENT CARD] tz, no server tz, empty container `TZ`) — so this gap is
+  visible in logs instead of silently shifting a day.
+- Tests: at `01:36Z` with an injected zone `America/Los_Angeles`, `anchor`'s
+  `reference_date` is **2026-06-22**; `update` collapses a `Z` instant in that zone; the
+  UTC-fallback warning is asserted. `node --test`: 53 pass / 0 fail.
 
-This makes edits correct **today**, with no server or infra change required (the skill
-asks the server for the zone). The items below are the cleaner long-term contract.
+The skill side is now **ready and correct plumbing**: the moment any real tz is supplied
+(explicit `--tz`, a `[CURRENT CARD]` tz, or a `tz` field on the transcripts envelope),
+both extraction and edit resolve in the user's zone with **no further skill change**.
+It cannot fix the date by itself, because **the user's tz is not stored or emitted
+anywhere** — that is the work below.
 
-## Recommended follow-ups (server + infra teams)
+## The real fix — full-stack tz propagation (iOS + server)
 
-### 1. Server — put `tz` in the `[CURRENT CARD]` block (extends javis-server PR #89)
-The card-thread agent turn already injects `[CURRENT CARD]` (dedup_key + current
-fields). **Add the user's `tz`** to that block. Then the skill reads it directly and
-passes `--tz`/stdin `tz` — no extra `GET` round-trip, and the zone is always the
-current one. This is the proper contract: the edit turn should never have to guess or
-re-fetch its zone.
+The user's timezone must be **captured and propagated**. Detailed in the companion spec
+**`javis-server/docs/superpowers/specs/2026-06-23-user-timezone-propagation.md`**.
+Summary of the three required pieces:
 
-- Where: the `[CURRENT CARD]` assembly added in `a0f0936` (`app/routers/agent.py`,
-  `app/services/card_session.py`).
-- Shape: one extra line, e.g. `tz: America/Los_Angeles`, from the same user-tz source
-  the `/transcripts/recent` envelope uses.
+1. **iOS — send the device tz.** Report the device IANA zone
+   (`TimeZone.current.identifier`) to the server on login / session create / a small
+   profile call. The device is the only place that actually knows it.
+2. **Server + DB — store and emit it.**
+   - Add a `users.timezone` (nullable IANA string) column (migration); persist what iOS
+     sends.
+   - **Emit it where the skill already looks:** add a top-level `tz` to the
+     `GET /api/transcripts/recent` envelope (fixes **extraction** immediately) **and**
+     to the `[CURRENT CARD]` block from `a0f0936` (fixes **edit** with no extra GET).
+   - Default to `UTC` only when unknown (and surface that to the user as a setting).
+3. **Skill — already done (v0.5.3).** Consumes envelope `tz`, `[CURRENT CARD]` tz, and
+   `fetchServerTz`; warns on UTC fallback. No further change once the server emits `tz`.
 
-### 2. Infra — set `TZ` on the per-user `openclaw-user-*` containers
-Start each per-user container with `TZ=<user tz>`. Defense-in-depth: every skill's
-date logic (not just calendar-extractor) then resolves in the user's zone, and the
-UTC fallback never bites. Caveat: `TZ` is fixed at container start, so it goes stale
-if the user travels — which is exactly why the skill prefers the **live** server zone
-over `TZ`. Treat infra `TZ` as a backstop, not the primary fix.
+### Why the earlier "infra `TZ`" idea is not enough
+Setting `TZ` on the container forces a **single** zone per container and goes stale when
+the user travels — and it still leaves **extraction** wrong unless the envelope carries
+tz. It is at best a coarse backstop; the per-user, device-sourced tz above is the fix.
 
-### Recommendation
-Ship the skill fix (done) now; do **both** follow-ups. Server `[CURRENT CARD]` tz is
-the correct primary contract; infra `TZ` is cheap global insurance.
-
-## Acceptance (re-test)
+## Acceptance (re-test, after the server emits `tz`)
 Repeat the e2e edit ("8 pm today") in the evening Pacific. Expect the row stored at
-**June 22 20:00** and the card rendered on **June 22**, confirmed — one row, no
-duplicate.
+**June 22 20:00**, rendered on **June 22**, confirmed — one row. Also confirm a fresh
+**extraction** with no explicit time infers the slot on the correct **local** day (no
+more "10:00 AM UTC"). Until then, the skill logs the UTC-fallback warning on every edit.

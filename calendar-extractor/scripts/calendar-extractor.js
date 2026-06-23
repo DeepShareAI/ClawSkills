@@ -43,10 +43,11 @@
  *   OPENCLAW_GATEWAY_TOKEN  required for fetch/push/update — Bearer auth to javis-server
  *                           (injected automatically inside the openclaw container)
  *   JAVIS_SERVER_URL        optional — defaults to http://javis-server:8000
- *   TZ                      optional — IANA zone used when the fetch payload carries
- *                           no tz; otherwise the system zone is used. `update` takes
- *                           the card zone from its stdin `tz` field, and `anchor`
- *                           from a `--tz` flag; both fall back to TZ env -> system.
+ *   TZ                      optional — IANA zone used as a LAST resort. Edit turns
+ *                           (`update` via stdin `tz`, `anchor` via `--tz`) prefer the
+ *                           explicit [CURRENT CARD] zone, then the server's authoritative
+ *                           zone (transcripts envelope), then TZ env -> system. The
+ *                           server step matters: the prod container TZ is empty (UTC).
  *
  * Verified endpoints (javis-server):
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
@@ -119,6 +120,9 @@ function parseArgv() {
 }
 
 function getFlag(name, dflt) {
+  // `rest` is only populated by parseArgv (the CLI entry). Under require() from a
+  // unit test it is undefined — return the default rather than throwing.
+  if (!Array.isArray(rest)) return dflt;
   const i = rest.indexOf(`--${name}`);
   return i >= 0 && i + 1 < rest.length ? rest[i + 1] : dflt;
 }
@@ -156,6 +160,39 @@ function resolveTz(payloadTz) {
     if (z) return z;
   } catch (_) { /* fall through */ }
   return 'UTC';
+}
+
+// ---- edit-turn timezone resolution ---------------------------------------
+// An edit turn ("set it to 6pm today") MUST resolve relative dates in the
+// user's CALENDAR zone. Unlike fetch, anchor/update carry no envelope tz, and in
+// prod the per-user openclaw container's `TZ` env is EMPTY -> Node resolves to
+// UTC. West of UTC in the evening that shifts "today" forward a day (6pm PDT Jun
+// 22 == 01:00 UTC Jun 23), so an edit landed on the wrong date. So when no zone
+// is supplied explicitly (--tz / stdin `tz` / the server's [CURRENT CARD] tz),
+// ask the server for the authoritative zone before falling back to env/system.
+//
+// Best-effort: the user's tz rides on the /transcripts/recent envelope (the same
+// field fetch already trusts). A failed/again-UTC lookup just falls through.
+async function fetchServerTz(token, deps = {}) {
+  try {
+    const httpGet = deps.httpGet || defaultHttpGet;
+    const since = encodeURIComponent(new Date(Date.now() - 3600 * 1000).toISOString());
+    const data = await httpGet(`${SERVER}/api/transcripts/recent?since=${since}&limit=1`, token);
+    const tz = data && data.tz;
+    return tz && String(tz).trim() ? String(tz).trim() : null;
+  } catch (_) {
+    return null; // best-effort; env/system fallback applies
+  }
+}
+
+// Resolve the user's calendar zone for an edit turn. Order:
+//   explicit (--tz / stdin tz / [CURRENT CARD] tz) -> server (authoritative)
+//   -> TZ env -> system zone. `deps.fetchTz` overrides the network call (tests).
+async function resolveUserTz({ explicitTz, token, deps = {} } = {}) {
+  if (explicitTz && String(explicitTz).trim()) return String(explicitTz).trim();
+  if (deps.fetchTz) { const t = await deps.fetchTz(); if (t) return String(t).trim(); }
+  else if (token) { const t = await fetchServerTz(token, deps); if (t) return t; }
+  return resolveTz(null);
 }
 
 // ---- fetch ---------------------------------------------------------------
@@ -507,8 +544,11 @@ async function doUpdate(deps = {}) {
   const client = deps.client || defaultPushClient;
   const token = deps.token || requireToken();
   const { dedup_key, patch, tz: inputTz } = deps.input || await readStdinUpdate();
-  // Prefer an explicit deps.tz (tests), then the card zone from stdin, then env/system.
-  const tz = deps.tz || resolveTz(inputTz);
+  // Zone order: explicit deps.tz (tests) -> stdin/[CURRENT CARD] tz -> the
+  // server's authoritative zone -> env/system. The server step matters because
+  // the container TZ is empty (UTC) in prod, which shifted an offset-bearing
+  // changed time onto the wrong day.
+  const tz = deps.tz || await resolveUserTz({ explicitTz: inputTz, token, deps });
 
   const key = (dedup_key == null ? '' : String(dedup_key)).trim();
   if (!key) {
@@ -536,11 +576,14 @@ async function doUpdate(deps = {}) {
 // Print ONLY the relative-date anchor for the CURRENT clock. An edit turn runs
 // this to resolve "today / 6 pm / tomorrow" against now (the chat happens later
 // than extraction, so the original fetch anchor is stale). No transcript fetch.
-// tz: optional --tz flag (the card zone, when the edit turn knows it) -> TZ env
-// -> system zone. A correct anchor zone matters when the container TZ != the
-// user's calendar zone, so "today / 6 pm" resolves against the calendar's day.
-function doAnchor(deps = {}) {
-  const tz = deps.tz || resolveTz('tzFlag' in deps ? deps.tzFlag : getFlag('tz', null));
+// Zone order: explicit --tz flag ([CURRENT CARD] tz, when the edit turn knows
+// it) -> the server's authoritative zone -> TZ env -> system. A correct anchor
+// zone is load-bearing: the container TZ is empty (UTC) in prod, so a bare
+// anchor resolved "today" a day ahead and the edit landed on the wrong date.
+async function doAnchor(deps = {}) {
+  const explicitTz = deps.tz || ('tzFlag' in deps ? deps.tzFlag : getFlag('tz', null));
+  const token = deps.token || process.env.OPENCLAW_GATEWAY_TOKEN || null;
+  const tz = await resolveUserTz({ explicitTz, token, deps });
   const nowIso = deps.now ? deps.now() : new Date().toISOString();
   const out = { ...localAnchor(nowIso, tz), tz };
   if (deps.emit) deps.emit(out);
@@ -568,6 +611,8 @@ module.exports = {
   buildUpdateItem,
   patchIsEmpty,
   resolveTz,
+  resolveUserTz,
+  fetchServerTz,
   filterToUnit,
   sessionSource,
   sessionId,

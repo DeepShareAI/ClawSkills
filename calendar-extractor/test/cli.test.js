@@ -271,6 +271,59 @@ test('doPush only delivers the NEW events when mixing seen and fresh', async () 
   assert.doesNotMatch(client.calls.push[1].content, /Old/);
 });
 
+// ---- THE PUSH TZ FIX: mirror in the server zone, not the container UTC ----
+// Mirrors the doUpdate server-tz regression in update.test.js. The EXTRACTION
+// push path used to resolve tz via resolveTz(null) (-> TZ env -> system -> UTC in
+// prod), so a "June 22 7pm PDT" event (a Z instant 2026-06-23T02:00:00Z) was
+// stored as the UTC instant 2026-06-23 02:00:00 instead of the user's wall-clock
+// 2026-06-22 19:00:00, landing the card on the wrong day. With NO deps.tz and the
+// server's authoritative zone injected via deps.fetchTz, the mirrored start_at is
+// the naive-local wall-clock in that zone (no Z/offset). deps.fetchTz keeps the
+// resolveUserTz call offline.
+test('doPush mirrors start_at in the SERVER zone when no deps.tz (no UTC instant stamped)', async () => {
+  // A mirror that captures the tz doPush resolved AND shapes the skill_data items
+  // exactly as the real mirror does (buildSkillDataItems with that tz), so we
+  // assert the naive-local start_at the row would actually carry.
+  const { buildSkillDataItems } = require('../scripts/lib');
+  const recorded = { tz: null, items: null };
+  const client = {
+    mirror: async (_token, events, tz) => {
+      recorded.tz = tz;
+      recorded.items = buildSkillDataItems(events, tz);
+    },
+    push: async () => {},
+  };
+  const store = makeStore({ userId: 'self' });
+  const events = [{ title: 'Dinner', startAt: '2026-06-23T02:00:00.000Z', endAt: null, // 11am JST Jun 23
+    location: null, attendees: [], notes: null, sourceRef: 'sid-1', sourceKind: 'audio' }];
+
+  // Inject a SERVER zone (Asia/Tokyo) that differs from BOTH the runner's system
+  // zone and UTC, and pin TZ='' for the call to deterministically exercise the
+  // prod container's empty-TZ path. This makes the assertion discriminate on any
+  // runner: the buggy `resolveTz(null)` fallback would yield UTC here (collapsing
+  // to 2026-06-23T02:00:00, a day off), never the Tokyo wall-clock below. With a
+  // bare server zone equal to the dev/CI system zone the old code would pass by
+  // coincidence — Tokyo + empty TZ removes that false-green.
+  const prevTz = process.env.TZ;
+  process.env.TZ = '';
+  try {
+    // No deps.tz: resolveUserTz must reach for the server zone (fetchTz), not UTC.
+    await doPush({
+      token: 't', client, events, ...store, now: NOW,
+      fetchTz: async () => 'Asia/Tokyo',
+    });
+  } finally {
+    if (prevTz === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTz;
+  }
+
+  // doPush resolved the SERVER zone (via fetchTz), not the container UTC.
+  assert.equal(recorded.tz, 'Asia/Tokyo', 'push resolves the server zone, not UTC');
+  const [item] = recorded.items;
+  assert.equal(item.start_at, '2026-06-23T11:00:00', 'Z instant collapses in the server zone (Jun 23 11am Tokyo), not UTC (Jun 23 2am) or system-LA (Jun 22 7pm)');
+  assert.doesNotMatch(item.start_at, /[Z+]/, 'start_at carries no Z/offset (naive-local)');
+});
+
 test('doPush with an empty events array pushes nothing (empty-fetch path)', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });

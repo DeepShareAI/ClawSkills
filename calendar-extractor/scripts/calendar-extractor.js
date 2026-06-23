@@ -6,7 +6,7 @@
  * HINT in the run prompt that the agent may use alongside the transcript), OR run
  * by the LLM on user-typed commands ("today's meetings" / "calendar extract").
  *
- * Two subcommands:
+ * Four subcommands:
  *   fetch  GET recent session transcripts from javis-server and print them as JSON
  *          to stdout. The agent reads this and extracts the calendar events.
  *          With --session <id> / --kbd-input <id> the payload is filtered to a
@@ -18,26 +18,42 @@
  *          NEW events to the user's iOS chat. The skill does NOT self-gate per unit —
  *          the server owns run-once (DispatchRouteExecuted); the human gate is the
  *          Confirm/Discard on the PENDING calendar rows, not an approve-to-run card.
+ *   update read an edit JSON ({ dedup_key, patch }) on stdin and upsert that ONE
+ *          existing card in place. The dedup_key is passed VERBATIM (never recomputed
+ *          from the new time — that would spawn a second row), and the item rides
+ *          status:"confirmed" so the server flips the pending row to confirmed
+ *          atomically. The patch is a FULL merged state (current fields + the change),
+ *          because the server overwrites payload/start_at/end_at wholesale. NO `seen`
+ *          filtering and NO /api/agent/push — the iOS card re-render is the feedback.
+ *   anchor print ONLY the relative-date anchor (localAnchor(now, tz) + tz) so an edit
+ *          turn can resolve "today / 6 pm / tomorrow" against the CURRENT clock (the
+ *          chat happens later than extraction, so the original anchor is stale). No
+ *          transcript fetch.
  *
  * Usage:
  *   node calendar-extractor.js <userId> fetch [--hours N] [--limit N]
  *   node calendar-extractor.js <userId> fetch --session <sessionId> [--hours N]
  *   node calendar-extractor.js <userId> fetch --kbd-input <inputId> [--hours N]
  *   node calendar-extractor.js <userId> push  < events.json
+ *   node calendar-extractor.js <userId> update < edit.json
+ *   node calendar-extractor.js <userId> anchor
  *   node calendar-extractor.js --help
  *
  * Env:
- *   OPENCLAW_GATEWAY_TOKEN  required for fetch/push — Bearer auth to javis-server
+ *   OPENCLAW_GATEWAY_TOKEN  required for fetch/push/update — Bearer auth to javis-server
  *                           (injected automatically inside the openclaw container)
  *   JAVIS_SERVER_URL        optional — defaults to http://javis-server:8000
  *   TZ                      optional — IANA zone used when the fetch payload carries
- *                           no tz; otherwise the system zone is used.
+ *                           no tz; otherwise the system zone is used. `update` takes
+ *                           the card zone from its stdin `tz` field, and `anchor`
+ *                           from a `--tz` flag; both fall back to TZ env -> system.
  *
  * Verified endpoints (javis-server):
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/agent/push          (get_gateway_user; {skill, content, session_id?})
- *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key)
+ *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key) — used by
+ *                                 both push (status:"pending") and update (status:"confirmed")
  */
 'use strict';
 
@@ -48,6 +64,7 @@ const {
   isoOrNull,
   normalizeEvent,
   dedupKey,
+  toNaiveLocal,
   localAnchor,
   buildSkillDataItems,
   pruneSeen,
@@ -59,7 +76,7 @@ const SERVER = process.env.JAVIS_SERVER_URL || 'http://javis-server:8000';
 // argv is parsed lazily so `require()`-ing this module from a unit test is
 // side-effect-free (no --help exit, no userId sanitize/exit on the test runner's
 // argv). The CLI entry point (main) is the only caller of parseArgv().
-const SUBCOMMANDS = ['fetch', 'push'];
+const SUBCOMMANDS = ['fetch', 'push', 'update', 'anchor'];
 let userId, subcommand, rest;
 
 function parseArgv() {
@@ -69,11 +86,18 @@ function parseArgv() {
       '  node calendar-extractor.js <userId> fetch [--hours N] [--limit N]',
       '  node calendar-extractor.js <userId> fetch --session <sessionId> [--hours N]',
       '  node calendar-extractor.js <userId> fetch --kbd-input <inputId> [--hours N]',
-      '  node calendar-extractor.js <userId> push  < events.json',
+      '  node calendar-extractor.js <userId> push   < events.json',
+      '  node calendar-extractor.js <userId> update < edit.json',
+      '  node calendar-extractor.js <userId> anchor [--tz <IANA>]',
       '',
       'fetch  GET recent transcripts from javis-server -> JSON on stdout',
       '         --session/--kbd-input filter to one unit (the auto-run dispatcher unit)',
       'push   read extracted-events JSON on stdin -> dedup (seen) + push markdown digest to iOS',
+      'update read { dedup_key, patch, tz? } on stdin -> upsert that ONE card in place',
+      '         (verbatim dedup_key, status:"confirmed", naive-local times, full merged payload)',
+      '         tz = the card\'s calendar zone (collapses offset-bearing changed times correctly)',
+      'anchor print { reference_time, reference_date, reference_weekday, reference_time_utc, tz }',
+      '         for the CURRENT clock (resolve "today / 6 pm / tomorrow" on an edit turn); --tz <IANA>',
     ].join('\n'));
     process.exit(0);
   }
@@ -272,6 +296,18 @@ async function pushToiOS(token, content, dedupKey) {
   if (!res.ok) throw new Error(`POST /api/agent/push -> HTTP ${res.status}`);
 }
 
+// Shared POST /api/skill/data upsert. Both the push path (status:"pending"
+// mirror) and the update path (status:"confirmed" in-place edit) write through
+// here, so the request shape and failure semantics stay in one place.
+async function postSkillData(token, items) {
+  const res = await fetch(`${SERVER}/api/skill/data`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skill: SLUG, type: 'event', merge: 'upsert', items }),
+  });
+  if (!res.ok) throw new Error(`POST /api/skill/data -> HTTP ${res.status}`);
+}
+
 async function mirrorToSkillData(token, events, tz) {
   // Best-effort server-side mirror so the iOS app can read events via Clerk auth.
   // The container's gateway token can WRITE here, but cannot read back
@@ -286,12 +322,7 @@ async function mirrorToSkillData(token, events, tz) {
   // pending and the iOS calendar table shows it greyed/dashed with Confirm/Discard.
   // The event becomes solid only when the user taps Confirm; Discard deletes it.
   const items = buildSkillDataItems(events, tz);
-  const res = await fetch(`${SERVER}/api/skill/data`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skill: SLUG, type: 'event', merge: 'upsert', items }),
-  });
-  if (!res.ok) throw new Error(`POST /api/skill/data -> HTTP ${res.status}`);
+  await postSkillData(token, items);
 }
 
 // The two server writes the push path performs, wrapped so tests can inject a
@@ -300,6 +331,11 @@ async function mirrorToSkillData(token, events, tz) {
 const defaultPushClient = {
   mirror: (token, events, tz) => mirrorToSkillData(token, events, tz),
   push: (token, content, dedupKey) => pushToiOS(token, content, dedupKey),
+  // The update path's single-item upsert (status:"confirmed"). Separate from
+  // mirror() (which shapes a pending events array) so a test can inject a
+  // recording mock and assert the EXACT item posted — verbatim dedup_key,
+  // status, and naive-local times — without hitting the network.
+  upsert: (token, items) => postSkillData(token, items),
 };
 
 // Read + parse + normalize the stdin events array.
@@ -372,11 +408,153 @@ async function doPush(deps = {}) {
   console.log(`Pushed ${freshEvents.length} new event(s) to iOS.`);
 }
 
+// ---- update --------------------------------------------------------------
+// Read + parse the in-thread edit JSON: { dedup_key, patch }. Returns the raw
+// shape (no normalization here — buildUpdateItem does the shaping) so doUpdate
+// can validate the key and patch before any write.
+async function readStdinUpdate() {
+  let input = '';
+  for await (const chunk of process.stdin) input += chunk;
+  input = input.trim();
+  if (!input) throw new Error("update expects an edit JSON { dedup_key, patch } on stdin (got empty input).");
+
+  let parsed;
+  try { parsed = JSON.parse(input); }
+  catch (e) { throw new Error(`stdin is not valid JSON: ${e.message}`); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('update stdin must be an object { dedup_key, patch }.');
+  }
+  // Optional `tz`: the card's calendar zone (the agent reads it off [CURRENT
+  // CARD] / the anchor). update has no fetch envelope to derive tz from, and the
+  // container's TZ env is NOT assumed equal to the user's calendar zone (fetch
+  // deliberately prefers the envelope tz over the env), so an offset-BEARING
+  // changed time must be collapsed against the card zone, not resolveTz(null).
+  return { dedup_key: parsed.dedup_key, patch: parsed.patch, tz: parsed.tz };
+}
+
+// A patch with no meaningful field is a no-op — nothing to write. Whitespace-only
+// strings and empty arrays do not count as a change.
+function patchIsEmpty(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return true;
+  const FIELDS = ['start_at', 'end_at', 'title', 'location', 'attendees', 'notes'];
+  return !FIELDS.some((k) => {
+    const v = patch[k];
+    if (v == null) return false;
+    if (typeof v === 'string') return v.trim() !== '';
+    if (Array.isArray(v)) return v.length > 0;
+    return true;
+  });
+}
+
+// A zoneless calendar datetime "YYYY-MM-DDTHH:MM:SS" (no trailing Z, no +HH:MM
+// offset, optional fractional seconds). The [CURRENT CARD] block stores
+// start_at/end_at exactly this way (that is what toNaiveLocal wrote on push), so
+// an UNCHANGED time the agent copies forward arrives in this shape.
+const NAIVE_LOCAL_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+// Render a patch time to the naive-local wall-clock written on the row.
+//   - An offset-less naive-local string (echoed verbatim from [CURRENT CARD]) is
+//     ALREADY the card's wall-clock; pass it through unchanged (dropping any
+//     fractional seconds). Feeding it to isoOrNull would parse it in the RUNNER
+//     PROCESS's zone and toNaiveLocal would re-project it into `tz`, silently
+//     shifting the time whenever the container zone != the card zone. Passing it
+//     through makes a non-time edit idempotent regardless of runner zone.
+//   - An offset/Z-bearing instant (a CHANGED time the agent resolved per SKILL.md
+//     step 3) is a true instant; collapse it to wall-clock in `tz`.
+function patchTimeToNaiveLocal(v, tz) {
+  if (v == null) return null;
+  if (typeof v === 'string' && NAIVE_LOCAL_RE.test(v.trim())) {
+    return v.trim().replace(/\.\d+$/, '');
+  }
+  return toNaiveLocal(isoOrNull(v), tz);
+}
+
+// Build the ONE skill_data upsert item for an in-thread edit. The dedup_key is
+// passed through VERBATIM (never recomputed from the new start time — that would
+// match no existing row and spawn a duplicate). The patch is treated as the FULL
+// merged intended state (the agent merges [CURRENT CARD] fields + the change),
+// because the server overwrites payload/start_at/end_at WHOLESALE. start_at/end_at
+// are written as naive-local wall-clock via patchTimeToNaiveLocal (no Z/offset —
+// the iOS invariant), and status:"confirmed" rides the item so the server flips
+// the pending row to confirmed atomically with the field write.
+//
+// Note: this hand-shapes the patch fields rather than routing through
+// normalizeEvent ON PURPOSE — the patch fields are already canonical (the agent
+// composed them from [CURRENT CARD] + the change), so the name/event_name/address
+// aliasing normalizeEvent does is unwanted here. We still .trim() the strings to
+// match normalizeEvent's whitespace handling.
+function buildUpdateItem(dedupKeyVerbatim, patch, tz) {
+  const p = patch || {};
+  const title = p.title != null ? (String(p.title).trim() || null) : null;
+  const location = p.location != null ? (String(p.location).trim() || null) : null;
+  const attendees = Array.isArray(p.attendees)
+    ? p.attendees.map((a) => String(a).trim()).filter(Boolean)
+    : (typeof p.attendees === 'string' && p.attendees.trim() ? [p.attendees.trim()] : []);
+  const notes = p.notes != null ? (String(p.notes).trim() || null) : null;
+  return {
+    dedup_key: dedupKeyVerbatim,           // VERBATIM — never dedupKey()
+    payload: { title, location, attendees, notes },
+    start_at: patchTimeToNaiveLocal(p.start_at, tz),
+    end_at: patchTimeToNaiveLocal(p.end_at, tz),
+    status: 'confirmed',                   // pending -> confirmed atomic flip
+  };
+}
+
+// In-thread card edit. Upserts ONE existing card in place by its verbatim
+// dedup_key and confirms it. No `seen` filtering, no /api/agent/push — the iOS
+// card re-render and the live chat reply are the user feedback.
+async function doUpdate(deps = {}) {
+  const client = deps.client || defaultPushClient;
+  const token = deps.token || requireToken();
+  const { dedup_key, patch, tz: inputTz } = deps.input || await readStdinUpdate();
+  // Prefer an explicit deps.tz (tests), then the card zone from stdin, then env/system.
+  const tz = deps.tz || resolveTz(inputTz);
+
+  const key = (dedup_key == null ? '' : String(dedup_key)).trim();
+  if (!key) {
+    // We cannot guess which row to edit — hard error, no write.
+    throw new Error('update requires a non-empty dedup_key (the card\'s original key). No row to edit.');
+  }
+
+  if (patchIsEmpty(patch)) {
+    console.log('No changes in patch — nothing to update.');
+    return;
+  }
+
+  // The original dedup_key (NOT the new time) keys the upsert; the patch is the
+  // full merged state the server writes wholesale.
+  const item = buildUpdateItem(key, patch, tz);
+  await client.upsert(token, [item]);
+
+  const slot = item.start_at
+    ? (item.end_at ? `${item.start_at} – ${item.end_at}` : item.start_at)
+    : 'time unchanged';
+  console.log(`Updated card (confirmed): ${item.payload.title || '(untitled)'} @ ${slot}`);
+}
+
+// ---- anchor --------------------------------------------------------------
+// Print ONLY the relative-date anchor for the CURRENT clock. An edit turn runs
+// this to resolve "today / 6 pm / tomorrow" against now (the chat happens later
+// than extraction, so the original fetch anchor is stale). No transcript fetch.
+// tz: optional --tz flag (the card zone, when the edit turn knows it) -> TZ env
+// -> system zone. A correct anchor zone matters when the container TZ != the
+// user's calendar zone, so "today / 6 pm" resolves against the calendar's day.
+function doAnchor(deps = {}) {
+  const tz = deps.tz || resolveTz('tzFlag' in deps ? deps.tzFlag : getFlag('tz', null));
+  const nowIso = deps.now ? deps.now() : new Date().toISOString();
+  const out = { ...localAnchor(nowIso, tz), tz };
+  if (deps.emit) deps.emit(out);
+  else console.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
 async function main() {
   parseArgv();
   if (subcommand === 'fetch') return doFetch();
   if (subcommand === 'push') return doPush();
-  throw new Error(`Unknown subcommand '${subcommand}'. Use 'fetch' or 'push' (see --help).`);
+  if (subcommand === 'update') return doUpdate();
+  if (subcommand === 'anchor') return doAnchor();
+  throw new Error(`Unknown subcommand '${subcommand}'. Use 'fetch', 'push', 'update', or 'anchor' (see --help).`);
 }
 
 // Export the load-bearing functions for unit tests (with injected IO). When run
@@ -385,6 +563,10 @@ async function main() {
 module.exports = {
   doFetch,
   doPush,
+  doUpdate,
+  doAnchor,
+  buildUpdateItem,
+  patchIsEmpty,
   resolveTz,
   filterToUnit,
   sessionSource,

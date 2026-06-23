@@ -44,10 +44,18 @@ node scripts/calendar-extractor.js fetch --kbd-input <inputId> [--hours N]   # k
 # Step 2 — push: pipe the extracted-events JSON array to stdin; dedups (seen) + delivers to iOS
 echo '<events-json-array>' | node scripts/calendar-extractor.js push
 
+# anchor — print the CURRENT relative-date anchor (resolve "today / 6 pm / tomorrow" on an edit turn)
+node scripts/calendar-extractor.js anchor            # optional: --tz <IANA> for the card's calendar zone
+
+# update — edit ONE pushed card in place (verbatim dedup_key, full merged patch, auto-confirm)
+echo '{"dedup_key":"<verbatim>","patch":{...}}' | node scripts/calendar-extractor.js update
+
 # Optional: explicit userId / multi-profile (back-compat — prepend the ID)
 node scripts/register.js <userId> <name>
 node scripts/calendar-extractor.js <userId> fetch
 echo '<events-json-array>' | node scripts/calendar-extractor.js <userId> push
+node scripts/calendar-extractor.js <userId> anchor
+echo '{"dedup_key":"<verbatim>","patch":{...}}' | node scripts/calendar-extractor.js <userId> update
 ```
 
 ## Workflow
@@ -82,6 +90,77 @@ reads the fetched transcripts and emits a JSON array of events.
      The server routes each push (carrying its `dedup_key`, no explicit `session_id`) into that card's
      own Agent Chat session, so **every event lands in its own iOS chat thread** instead of one combined
      digest. The pushes are informational — they are not a confirmation gate.
+
+## Editing a pushed card in-thread
+
+A user can correct a card by **replying in that card's own Agent Chat thread**
+("6 pm today", "location is Zoom", "add Alex"). The reply edits **that exact row
+in place and confirms it** — no duplicate row, no Confirm tap. The agent drives it:
+
+1. **Read the injected `[CURRENT CARD]` block.** When an agent turn runs inside a
+   card thread, the server injects a `[CURRENT CARD]` block carrying the card's
+   **original `dedup_key` (verbatim)** plus its current fields (`title`,
+   `start_at`, `end_at`, `location`, `attendees`, `notes`, `status`). This is the
+   source of truth for the row you are editing.
+2. **Run `anchor` for a fresh "now".** `node scripts/calendar-extractor.js anchor`
+   prints `{ reference_time, reference_date, reference_weekday, reference_time_utc,
+   tz }` for the **current** clock. The chat happens *later* than extraction, so
+   the original fetch anchor is stale — resolve "today / 6 pm / tomorrow" against
+   this fresh anchor (same date-resolution discipline as extraction: anchor on
+   `reference_time`/`reference_date`, never your own "today").
+3. **Resolve the correction; null-not-guess.** Resolve the user's change against
+   the anchor and emit a full ISO 8601 instant **with the explicit `tz` UTC
+   offset** (e.g. `2026-06-22T18:00:00-07:00`). If the change is ambiguous or
+   unresolvable (e.g. "at 8" with no AM/PM, no weekday anchor), **do not call
+   `update`** — ask a follow-up in-thread instead. Emit `null` rather than guess.
+4. **Merge into a FULL patch (wholesale-payload rule).** The server overwrites
+   `payload`/`start_at`/`end_at` **wholesale** on the matched row, so the `patch`
+   must carry the **complete intended state** — the current fields from
+   `[CURRENT CARD]` **merged with** the user's change, not just the changed field.
+   A time-only edit must still resend `title`/`location`/`attendees`/`notes`, or
+   they would be blanked.
+   - **Times you are NOT changing:** copy the `start_at`/`end_at` strings from
+     `[CURRENT CARD]` **verbatim**. Those are already naive-local wall-clock in the
+     card zone (no offset) and the script passes a zoneless `YYYY-MM-DDTHH:MM:SS`
+     value through unchanged — it will **not** re-interpret it in the runner's
+     zone. (A time you *are* changing must be a full offset-bearing instant per
+     step 3, so the script can collapse it correctly.)
+   - **Pass the card zone.** Include the card's `tz` (read it off the anchor /
+     `[CURRENT CARD]`) as a top-level `tz` so the script collapses any
+     offset-bearing changed time against the user's calendar zone, not the
+     container's process zone (which is not assumed equal).
+5. **Run `update` with the verbatim `dedup_key`.**
+
+   ```bash
+   echo '{
+     "dedup_key": "<the [CURRENT CARD] dedup_key, VERBATIM>",
+     "tz": "America/Los_Angeles",
+     "patch": {
+       "title": "Design Review", "location": "Zoom",
+       "attendees": ["Sam"], "notes": "bring laptop",
+       "start_at": "2026-06-22T18:00:00-07:00",
+       "end_at":   "2026-06-22T19:00:00-07:00"
+     }
+   }' | node scripts/calendar-extractor.js update
+   ```
+
+   The script POSTs **one** `/api/skill/data` upsert with that verbatim key and
+   `status: "confirmed"`. It does **NOT** recompute the key from the new time
+   (that would create a second row — the whole bug), writes `start_at`/`end_at`
+   as **naive-local** wall-clock (no `Z`/offset), does **no `seen`-dedup
+   filtering**, and does **not** call `/api/agent/push`.
+
+**Auto-confirm semantics.** Stating the corrected value in chat *is* the
+confirmation: the upsert's `status: "confirmed"` flips the row `pending →
+confirmed` **atomically with the field write** (strictly that direction —
+confirmed never downgrades). The skill never calls a separate `/confirm`
+endpoint. The iOS card re-render and the live chat reply are the user feedback.
+If `/api/skill/data` fails, the script reports the error (non-silent) — tell the
+user the card couldn't be updated; do **not** claim success.
+
+This path is **edit-only** of an existing card — creating new events from chat,
+re-opening a confirmed row, or deleting via chat (Discard covers delete) are out
+of scope.
 
 ## How this skill is invoked
 

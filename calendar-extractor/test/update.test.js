@@ -17,7 +17,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { doUpdate, doAnchor } = require('../scripts/calendar-extractor');
+const { doUpdate, doAnchor, resolveUserTz } = require('../scripts/calendar-extractor');
 const { dedupKey } = require('../scripts/lib');
 
 const TZ = 'America/Los_Angeles';
@@ -378,6 +378,31 @@ test('doAnchor falls back to TZ env when no explicit zone and the server lookup 
     assert.equal(emitted.reference_date, '2026-06-23', 'UTC fallback keeps the documented (last-resort) behavior');
   } finally {
     if (origTZ === undefined) delete process.env.TZ; else process.env.TZ = origTZ;
+  }
+});
+
+// ---- UTC-fallback warning (the "no tz anywhere" gap is loud, not silent) ---
+test('resolveUserTz warns to stderr when it falls back to UTC (no tz anywhere)', async () => {
+  const origTZ = process.env.TZ; process.env.TZ = 'UTC';
+  const errs = []; const origErr = console.error; console.error = (...a) => errs.push(a.join(' '));
+  try {
+    const tz = await resolveUserTz({ fetchTz: async () => null }); // server has no tz
+    assert.equal(tz, 'UTC');
+    assert.ok(errs.some((l) => /no user timezone available/.test(l)), 'warns on UTC fallback');
+  } finally {
+    console.error = origErr;
+    if (origTZ === undefined) delete process.env.TZ; else process.env.TZ = origTZ;
+  }
+});
+
+test('resolveUserTz does NOT warn when a real zone is resolved', async () => {
+  const errs = []; const origErr = console.error; console.error = (...a) => errs.push(a.join(' '));
+  try {
+    const tz = await resolveUserTz({ explicitTz: 'America/Los_Angeles' });
+    assert.equal(tz, 'America/Los_Angeles');
+    assert.equal(errs.length, 0, 'no warning when a real zone is found');
+  } finally {
+    console.error = origErr;
   }
 });
 

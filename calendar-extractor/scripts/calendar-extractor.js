@@ -192,7 +192,20 @@ async function resolveUserTz({ explicitTz, token, deps = {} } = {}) {
   if (explicitTz && String(explicitTz).trim()) return String(explicitTz).trim();
   if (deps.fetchTz) { const t = await deps.fetchTz(); if (t) return String(t).trim(); }
   else if (token) { const t = await fetchServerTz(token, deps); if (t) return t; }
-  return resolveTz(null);
+  // No explicit zone and the server gave us none — today the /transcripts/recent
+  // envelope carries NO tz and there is no users.timezone column, so the user's
+  // real zone never reaches this pipeline. We fall back to TZ env -> system; in
+  // the prod container TZ is empty -> UTC, which silently shifts relative dates
+  // ("today") a day west of UTC. Warn loudly so the gap is visible until the
+  // server emits the user's tz (see docs .../calendar-edit-timezone-fix.md).
+  const fallback = resolveTz(null);
+  if (fallback === 'UTC') {
+    console.error('⚠️ calendar-extractor: no user timezone available (no explicit/[CURRENT CARD] tz, '
+      + 'server envelope carries no tz, container TZ empty) — resolving dates in UTC; relative dates '
+      + 'like "today" may be off by a day. Real fix: propagate the user tz (iOS → server → '
+      + '/transcripts/recent envelope + [CURRENT CARD]).');
+  }
+  return fallback;
 }
 
 // ---- fetch ---------------------------------------------------------------

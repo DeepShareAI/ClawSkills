@@ -66,6 +66,7 @@ const { resolveUserId, safeUserPath, readJson, writeJson } = require('./data');
 const {
   isoOrNull,
   normalizeEvent,
+  normalizeLeadTime,
   dedupKey,
   toNaiveLocal,
   localAnchor,
@@ -496,7 +497,7 @@ async function readStdinUpdate() {
 // strings and empty arrays do not count as a change.
 function patchIsEmpty(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return true;
-  const FIELDS = ['start_at', 'end_at', 'title', 'location', 'attendees', 'notes'];
+  const FIELDS = ['start_at', 'end_at', 'title', 'location', 'attendees', 'notes', 'lead_time'];
   return !FIELDS.some((k) => {
     const v = patch[k];
     if (v == null) return false;
@@ -556,6 +557,13 @@ function buildUpdateItem(dedupKeyVerbatim, patch, tz) {
     payload: { title, location, attendees, notes },
     start_at: patchTimeToNaiveLocal(p.start_at, tz),
     end_at: patchTimeToNaiveLocal(p.end_at, tz),
+    // Preserve the per-event voice-call lead time across an in-thread edit. The
+    // agent merges [CURRENT CARD]'s lead_time into the full patch (like title/
+    // location); an absent value defaults to 10 so a card pushed before this
+    // field existed, edited later, still gets the standard lead. The server reads
+    // it row-level (not from the wholesale-overwritten payload) to schedule the
+    // proactive call's fire time.
+    lead_time: normalizeLeadTime(p.lead_time),
     status: 'confirmed',                   // pending -> confirmed atomic flip
   };
 }

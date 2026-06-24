@@ -17,7 +17,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { doUpdate, doAnchor, resolveUserTz } = require('../scripts/calendar-extractor');
+const { doUpdate, doAnchor, resolveUserTz, buildUpdateItem, patchIsEmpty } = require('../scripts/calendar-extractor');
 const { dedupKey } = require('../scripts/lib');
 
 const TZ = 'America/Los_Angeles';
@@ -125,6 +125,63 @@ test('doUpdate sends the full merged payload — a time-only patch keeps title/l
     notes: 'bring laptop',
   });
   assert.equal(item.start_at, '2026-06-22T18:00:00');
+});
+
+// ---- lead_time preserved across an in-thread edit ------------------------
+// The proactive voice-call lead must survive an edit. The agent merges
+// [CURRENT CARD]'s lead_time into the full patch (like title/location); the
+// upsert carries it row-level so the server re-schedules the call's fire time.
+test('doUpdate carries the patch lead_time onto the upsert item', async () => {
+  const client = makeClient();
+  await doUpdate({
+    token: 't', client, tz: TZ,
+    input: {
+      dedup_key: ORIGINAL_KEY,
+      patch: { title: 'Flight', start_at: '2026-06-22T18:00:00-07:00', lead_time: 60 },
+    },
+  });
+  const [item] = client.calls.upsert[0];
+  assert.equal(item.lead_time, 60, 'edited card keeps its (custom) lead time');
+  assert.ok(!('lead_time' in item.payload), 'lead_time is row-level, not in payload');
+});
+
+test('doUpdate defaults lead_time to 10 when the patch omits it (back-compat for old cards)', async () => {
+  const client = makeClient();
+  await doUpdate({
+    token: 't', client, tz: TZ,
+    input: {
+      dedup_key: ORIGINAL_KEY,
+      patch: { title: 'Design Review', location: 'Zoom' }, // no lead_time
+    },
+  });
+  const [item] = client.calls.upsert[0];
+  assert.equal(item.lead_time, 10);
+});
+
+test('buildUpdateItem emits a row-level lead_time (default 10, custom passes through)', () => {
+  const dflt = buildUpdateItem(ORIGINAL_KEY, { title: 'x' }, TZ);
+  assert.equal(dflt.lead_time, 10);
+  const custom = buildUpdateItem(ORIGINAL_KEY, { title: 'x', lead_time: 25 }, TZ);
+  assert.equal(custom.lead_time, 25);
+  const invalid = buildUpdateItem(ORIGINAL_KEY, { title: 'x', lead_time: -3 }, TZ);
+  assert.equal(invalid.lead_time, 10, 'invalid lead_time falls back to the default');
+});
+
+// A lead_time-only edit ("ring 30 min ahead") is a REAL change, not a no-op.
+test('patchIsEmpty treats a lead_time-only patch as a change (writes through)', () => {
+  assert.equal(patchIsEmpty({ lead_time: 30 }), false, 'lead_time alone is a meaningful edit');
+  assert.equal(patchIsEmpty({ lead_time: 0 }), false, '0 (ring at start) is meaningful');
+  assert.equal(patchIsEmpty({}), true);
+});
+
+test('doUpdate writes through a lead_time-only patch (not skipped as a no-op)', async () => {
+  const client = makeClient();
+  await doUpdate({
+    token: 't', client, tz: TZ,
+    input: { dedup_key: ORIGINAL_KEY, patch: { lead_time: 45 } },
+  });
+  assert.equal(client.calls.upsert.length, 1, 'lead_time-only edit still writes');
+  assert.equal(client.calls.upsert[0][0].lead_time, 45);
 });
 
 // ---- end_at omitted -> null (not stale/garbage), and end-only -> start null --

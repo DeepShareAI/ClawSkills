@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 
 const {
   SEEN_TTL_DAYS,
+  DEFAULT_LEAD_TIME_MINUTES,
   isoOrNull,
+  normalizeLeadTime,
   normalizeEvent,
   dedupKey,
   toNaiveLocal,
@@ -73,6 +75,43 @@ test('normalizeEvent carries source_ref and source_kind', () => {
   assert.equal(none.sourceKind, null);
 });
 
+// ---- normalizeLeadTime ---------------------------------------------------
+// The "Javis calls you" engine rings at `start − lead_time`. lead_time is
+// per-event minutes-before-start, default 10, and must be backward-compatible:
+// any absent/invalid value collapses to the default so pre-existing events
+// (extracted before the field existed) still ring 10 min ahead.
+test('normalizeLeadTime defaults to 10 for absent/empty/null', () => {
+  assert.equal(DEFAULT_LEAD_TIME_MINUTES, 10);
+  assert.equal(normalizeLeadTime(undefined), 10);
+  assert.equal(normalizeLeadTime(null), 10);
+  assert.equal(normalizeLeadTime(''), 10);
+  assert.equal(normalizeLeadTime('   '), 10);  // whitespace-only -> NaN -> default
+});
+
+test('normalizeLeadTime accepts numbers and numeric strings, floors fractions', () => {
+  assert.equal(normalizeLeadTime(15), 15);
+  assert.equal(normalizeLeadTime('20'), 20);
+  assert.equal(normalizeLeadTime('  5  '), 5);
+  assert.equal(normalizeLeadTime(12.9), 12);   // whole minutes only
+  assert.equal(normalizeLeadTime(0), 0);        // 0 is valid — ring at start
+});
+
+test('normalizeLeadTime rejects negative/non-finite, falling back to the default', () => {
+  assert.equal(normalizeLeadTime(-5), 10);
+  assert.equal(normalizeLeadTime('-1'), 10);
+  assert.equal(normalizeLeadTime(NaN), 10);
+  assert.equal(normalizeLeadTime(Infinity), 10);
+  assert.equal(normalizeLeadTime('abc'), 10);
+});
+
+test('normalizeEvent reads lead_time (default 10) onto the event', () => {
+  assert.equal(normalizeEvent({ title: 'x' }).leadTime, 10);          // absent -> default
+  assert.equal(normalizeEvent({ title: 'x', lead_time: 15 }).leadTime, 15);
+  assert.equal(normalizeEvent({ title: 'x', lead_time: '30' }).leadTime, 30);
+  assert.equal(normalizeEvent({ title: 'x', lead_time: 0 }).leadTime, 0);
+  assert.equal(normalizeEvent({ title: 'x', lead_time: -4 }).leadTime, 10); // invalid -> default
+});
+
 // ---- dedupKey ------------------------------------------------------------
 test('dedupKey is stable for equivalent events', () => {
   const a = normalizeEvent({ title: 'Team  Sync', start_at: '2026-06-03T17:00:00Z' });
@@ -114,7 +153,32 @@ test('buildSkillDataItems emits naive-local start/end and instant-based dedup_ke
   assert.equal(item.dedup_key, dedupKey(ev));          // dedup identity unchanged
   assert.equal(item.source_ref, '521');
   assert.equal(item.status, 'pending');                // Flow 3: written pending, confirm-to-solid
+  assert.equal(item.lead_time, 10);                    // default voice-call lead
   assert.deepEqual(item.payload, { title: 'Meeting', location: null, attendees: [], notes: null });
+});
+
+// ---- lead_time emission (proactive voice-call fire time) ------------------
+test('buildSkillDataItems emits lead_time top-level (default 10, carried per-event)', () => {
+  const dflt = normalizeEvent({ title: 'Standup', start_at: '2026-06-06T17:00:00Z' });
+  const custom = normalizeEvent({ title: 'Flight', start_at: '2026-06-06T15:00:00Z', lead_time: 60 });
+  const [a, b] = buildSkillDataItems([dflt, custom], 'America/Los_Angeles');
+  // Top-level row field (server reads it to compute fire = start − lead_time),
+  // NOT inside payload (which the server overwrites wholesale + iOS renders).
+  assert.equal(a.lead_time, 10);
+  assert.equal(b.lead_time, 60);
+  assert.ok(!('lead_time' in a.payload), 'lead_time is row-level, not in payload');
+});
+
+test('buildSkillDataItems carries the detail fields (location/attendees/notes) into payload', () => {
+  // These feed the server adapter's Details announcement context (spec §4B/§5).
+  const ev = normalizeEvent({
+    title: 'Design Review', start_at: '2026-06-06T22:00:00Z',
+    location: 'Zoom', attendees: ['Sam', 'Alex'], notes: 'bring laptop',
+  });
+  const [item] = buildSkillDataItems([ev], 'America/Los_Angeles');
+  assert.deepEqual(item.payload, {
+    title: 'Design Review', location: 'Zoom', attendees: ['Sam', 'Alex'], notes: 'bring laptop',
+  });
 });
 
 test('buildSkillDataItems tags every event status "pending" (Flow 3)', () => {

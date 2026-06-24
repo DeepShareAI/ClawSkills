@@ -69,8 +69,9 @@ reads the fetched transcripts and emits a JSON array of events.
    `OPENCLAW_GATEWAY_TOKEN` bearer and prints
    `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`. If fetch fails, returns invalid JSON, or yields zero sessions, output an empty events array and do not push anything; report the failure only if the user asked for a diagnostic. If the fetch response contains no sessions or the transcript text is empty, return `[]` and do not attempt to push a digest.
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
-   `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id), "source_kind" ("audio"|"keyboard", from the session's source) }`.
+   `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id), "source_kind" ("audio"|"keyboard", from the session's source), "lead_time" (minutes before start for the "Javis calls you" voice alert, optional — defaults to 10) }`.
    Carry `source_kind` through so provenance flows to the `/api/skill/data` mirror and the iOS digest.
+   **`lead_time`** is the per-event minutes-before-start at which the proactive voice-call engine rings the user (`fire = start − lead_time`). Omit it for the standard 10-minute lead; emit an integer only when the transcript states a different desired heads-up (e.g. "remind me an hour before the flight" → `60`). Negative/invalid values fall back to 10. The detail fields (`location`, `attendees`, `notes`) double as the announcement context the in-call **Details** command speaks, so keep them populated when the transcript provides them.
    **Date resolution (required):** the top-level `reference_time` is **already local
    wall-clock in `tz`** (zoneless) and `reference_date`/`reference_weekday` give the local
    "today" — so "today" == `reference_date`, and "tomorrow"/"Saturday"/"next Thursday" count
@@ -84,7 +85,7 @@ reads the fetched transcripts and emits a JSON array of events.
    party at 6pm" → 18:00). If the transcript does not provide enough information to determine a unique date/time (for example, only "next Friday" with no weekday anchor or an ambiguous time like "at 8" without AM/PM), emit `null` for the unresolved field rather than guessing. When multiple plausible interpretations are equally supported by the transcript, prefer the most specific one; if two interpretations remain equally plausible, emit `null` for the unresolved field rather than guessing. If the transcript mentions recurring meetings, all-day meetings, or multi-day events, preserve them as a single event only when the recurrence is explicit; otherwise emit a single event with the best available start/end times and note the ambiguity in `notes`.
 3. **Push** — pipe the events array into `node scripts/calendar-extractor.js <userId> push`. The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
-   - best-effort mirrors the **new** events to `POST /api/skill/data` (upsert by `dedup_key`) **tagged `status: "pending"`** so the server stores them pending and the iOS calendar table shows them greyed/dashed with **Confirm · Discard** — an event becomes solid only when the user taps **Confirm** (Discard deletes it),
+   - best-effort mirrors the **new** events to `POST /api/skill/data` (upsert by `dedup_key`) **tagged `status: "pending"`** so the server stores them pending and the iOS calendar table shows them greyed/dashed with **Confirm · Discard** — an event becomes solid only when the user taps **Confirm** (Discard deletes it). Each mirrored row carries a top-level **`lead_time`** (minutes, default 10) so the server's voice-call adapter can schedule the proactive call at `start − lead_time`; the detail fields (`location`/`attendees`/`notes`) ride in `payload` as the in-call announcement context,
    - delivers the **new** events **per card** — one `POST http://javis-server:8000/api/agent/push`
      per event, each `{"skill": "calendar-extractor", "content": "<markdown>", "dedup_key": "<event dedup_key>"}`.
      The server routes each push (carrying its `dedup_key`, no explicit `session_id`) into that card's
@@ -100,8 +101,11 @@ in place and confirms it** — no duplicate row, no Confirm tap. The agent drive
 1. **Read the injected `[CURRENT CARD]` block.** When an agent turn runs inside a
    card thread, the server injects a `[CURRENT CARD]` block carrying the card's
    **original `dedup_key` (verbatim)** plus its current fields (`title`,
-   `start_at`, `end_at`, `location`, `attendees`, `notes`, `status`). This is the
-   source of truth for the row you are editing.
+   `start_at`, `end_at`, `location`, `attendees`, `notes`, `lead_time`, `status`).
+   This is the source of truth for the row you are editing. Carry `lead_time`
+   forward in the merged patch (default 10 if the block omits it) so an edit never
+   silently resets the voice-call lead; set a new integer only if the user asks to
+   change the heads-up ("ring me 30 min before" → `lead_time: 30`).
 2. **Run `anchor` for a fresh "now".** `node scripts/calendar-extractor.js anchor`
    prints `{ reference_time, reference_date, reference_weekday, reference_time_utc,
    tz }` for the **current** clock. The chat happens *later* than extraction, so
@@ -146,6 +150,7 @@ in place and confirms it** — no duplicate row, no Confirm tap. The agent drive
      "patch": {
        "title": "Design Review", "location": "Zoom",
        "attendees": ["Sam"], "notes": "bring laptop",
+       "lead_time": 10,
        "start_at": "2026-06-22T18:00:00-07:00",
        "end_at":   "2026-06-22T19:00:00-07:00"
      }

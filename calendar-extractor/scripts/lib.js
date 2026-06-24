@@ -10,11 +10,41 @@
 
 const SEEN_TTL_DAYS = 30;
 
+// The "Javis calls you" proactive voice-call engine rings the user at
+// `start − lead_time`. Per the design spec (2026-06-24-javis-calls-you-voice-
+// calendar-alert-design.md §2/§4B) lead_time is per-event minutes-before-start,
+// defaulting to 10 when the extractor doesn't supply one. Kept here so the value
+// is normalized in exactly one place (normalizeEvent for fresh events,
+// buildUpdateItem for in-thread edits).
+const DEFAULT_LEAD_TIME_MINUTES = 10;
+
 // ---- event normalization -------------------------------------------------
 function isoOrNull(v) {
   if (!v) return null;
   const d = new Date(v);
   return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Coerce a raw lead_time into a non-negative integer count of minutes, falling
+// back to DEFAULT_LEAD_TIME_MINUTES (10). Backward-compatible: an absent, null,
+// empty, non-numeric, negative, or non-finite value all resolve to the default,
+// so events extracted before this field existed keep ringing 10 min ahead.
+// Accepts a number or a numeric string (the agent may emit either). Fractions
+// are floored (a lead time is whole minutes).
+function normalizeLeadTime(raw) {
+  if (raw == null) return DEFAULT_LEAD_TIME_MINUTES;
+  let n;
+  if (typeof raw === 'number') {
+    n = raw;
+  } else {
+    const s = String(raw).trim();
+    // Number('') === 0, which would wrongly treat an empty/whitespace string as
+    // "ring at start" — guard it so blank input collapses to the default.
+    if (s === '') return DEFAULT_LEAD_TIME_MINUTES;
+    n = Number(s);
+  }
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_LEAD_TIME_MINUTES;
+  return Math.floor(n);
 }
 
 function normalizeEvent(raw) {
@@ -30,7 +60,10 @@ function normalizeEvent(raw) {
   const notes = (raw.notes || raw.description || '').toString().trim() || null;
   const sourceRef = (raw.source_ref || raw.session_id || '').toString().trim() || null;
   const sourceKind = (raw.source_kind || raw.source || '').toString().trim().toLowerCase() || null;
-  return { title, startAt, endAt, location, attendees, notes, sourceRef, sourceKind };
+  // Per-event lead time (minutes before start) for the proactive voice call;
+  // defaults to 10 so pre-existing events without the field are unchanged.
+  const leadTime = normalizeLeadTime(raw.lead_time);
+  return { title, startAt, endAt, location, attendees, notes, sourceRef, sourceKind, leadTime };
 }
 
 function dedupKey(ev) {
@@ -97,12 +130,21 @@ function localAnchor(iso, tz) {
 // Every mirrored event is tagged status:"pending" (Flow 3): the server stores it
 // pending and the iOS calendar table renders it greyed/dashed with Confirm/Discard.
 // A pending row becomes solid only when the user taps Confirm; Discard deletes it.
+//
+// lead_time (minutes before start, default 10) rides each item top-level so the
+// server's CalendarVoiceCallSource can compute the proactive call's fire time
+// (`fire = start − lead_time`). It sits alongside start_at/status/source_ref —
+// the row-level fields the server consumes — NOT inside `payload` (which the
+// server overwrites wholesale on edit and the iOS table renders). The detail
+// fields the server's Details command speaks (location, notes, attendees) are
+// already carried in `payload`; they are the announcement context.
 function buildSkillDataItems(events, tz) {
   return (events || []).slice(0, 500).map((ev) => ({
     dedup_key: dedupKey(ev),
     payload: { title: ev.title, location: ev.location, attendees: ev.attendees, notes: ev.notes },
     start_at: toNaiveLocal(ev.startAt, tz),
     end_at: toNaiveLocal(ev.endAt, tz),
+    lead_time: normalizeLeadTime(ev.leadTime),
     source_ref: ev.sourceRef,
     status: 'pending',
   }));
@@ -130,7 +172,9 @@ function pruneSeen(seen, ttlDays) {
 
 module.exports = {
   SEEN_TTL_DAYS,
+  DEFAULT_LEAD_TIME_MINUTES,
   isoOrNull,
+  normalizeLeadTime,
   normalizeEvent,
   dedupKey,
   toNaiveLocal,

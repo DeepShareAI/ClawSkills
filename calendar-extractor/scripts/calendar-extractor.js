@@ -431,8 +431,13 @@ async function doPush(deps = {}) {
   const events = deps.events || await readStdinEvents();
 
   const state = load();
-  const seen = pruneSeen(state.seen || {});
+  // Anchor TTL pruning to the SAME clock we stamp `seen` entries with (deps.now
+  // in tests, real time in prod) so a just-recorded event is never pruned out
+  // from under its own dedup on the next run. Using Date.now() here while
+  // writing deps.now() timestamps would drop entries whenever the injected
+  // clock trails real time by more than the TTL.
   const nowIso = deps.now ? deps.now() : new Date().toISOString();
+  const seen = pruneSeen(state.seen || {}, undefined, Date.parse(nowIso));
 
   // Event-level dedup: only events not already delivered are new.
   const fresh = [];

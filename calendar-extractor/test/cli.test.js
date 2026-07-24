@@ -271,19 +271,17 @@ test('doPush only delivers the NEW events when mixing seen and fresh', async () 
   assert.doesNotMatch(client.calls.push[1].content, /Old/);
 });
 
-// ---- THE PUSH TZ FIX: mirror in the server zone, not the container UTC ----
+// ---- THE PUSH TZ FIX: doPush resolves the server zone, not the container UTC --
 // Mirrors the doUpdate server-tz regression in update.test.js. The EXTRACTION
-// push path used to resolve tz via resolveTz(null) (-> TZ env -> system -> UTC in
-// prod), so a "June 22 7pm PDT" event (a Z instant 2026-06-23T02:00:00Z) was
-// stored as the UTC instant 2026-06-23 02:00:00 instead of the user's wall-clock
-// 2026-06-22 19:00:00, landing the card on the wrong day. With NO deps.tz and the
-// server's authoritative zone injected via deps.fetchTz, the mirrored start_at is
-// the naive-local wall-clock in that zone (no Z/offset). deps.fetchTz keeps the
-// resolveUserTz call offline.
-test('doPush mirrors start_at in the SERVER zone when no deps.tz (no UTC instant stamped)', async () => {
+// push path must resolve tz via the server's authoritative zone (deps.fetchTz),
+// NOT resolveTz(null) (-> TZ env -> system -> UTC in prod). deps.fetchTz keeps the
+// resolveUserTz call offline. Since the absolute-instant fix (§B) the mirrored
+// start_at is a UTC-Z instant, so for a ZONED input it is tz-independent — the tz
+// resolution itself is what this test guards, via recorded.tz below.
+test('doPush resolves the SERVER zone when no deps.tz (fetchTz, not container UTC)', async () => {
   // A mirror that captures the tz doPush resolved AND shapes the skill_data items
   // exactly as the real mirror does (buildSkillDataItems with that tz), so we
-  // assert the naive-local start_at the row would actually carry.
+  // assert both the resolved zone and the absolute-instant start_at the row carries.
   const { buildSkillDataItems } = require('../scripts/lib');
   const recorded = { tz: null, items: null };
   const client = {
@@ -317,11 +315,14 @@ test('doPush mirrors start_at in the SERVER zone when no deps.tz (no UTC instant
     else process.env.TZ = prevTz;
   }
 
-  // doPush resolved the SERVER zone (via fetchTz), not the container UTC.
+  // doPush resolved the SERVER zone (via fetchTz), not the container UTC. This is
+  // the load-bearing assertion now: the buggy resolveTz(null) fallback would yield
+  // UTC/'' here instead of Asia/Tokyo.
   assert.equal(recorded.tz, 'Asia/Tokyo', 'push resolves the server zone, not UTC');
   const [item] = recorded.items;
-  assert.equal(item.start_at, '2026-06-23T11:00:00', 'Z instant collapses in the server zone (Jun 23 11am Tokyo), not UTC (Jun 23 2am) or system-LA (Jun 22 7pm)');
-  assert.doesNotMatch(item.start_at, /[Z+]/, 'start_at carries no Z/offset (naive-local)');
+  // Absolute-instant (§B): a ZONED input keeps its instant, emitted as UTC-Z.
+  assert.equal(item.start_at, '2026-06-23T02:00:00Z', 'zoned input keeps its absolute instant (UTC Z)');
+  assert.match(item.start_at, /Z$/, 'start_at is an absolute UTC instant with Z');
 });
 
 test('doPush with an empty events array pushes nothing (empty-fetch path)', async () => {

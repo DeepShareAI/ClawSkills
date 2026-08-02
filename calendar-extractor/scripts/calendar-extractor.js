@@ -261,7 +261,30 @@ async function doFetch(opts = {}, deps = {}) {
   const url = kbdFilter
     ? `${SERVER}/api/transcripts/keyboard-input/${encodeURIComponent(kbdFilter)}`
     : `${SERVER}/api/transcripts/recent?since=${encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString())}&limit=${limit}`;
-  const data = await httpGet(url, token);
+
+  // A single-unit re-fetch can 404 when the source row was dropped after the
+  // dispatcher scheduled this run (a keyboard_input insert rolled back, an id
+  // gap). The dispatcher now embeds the unit's transcript + source_ref/
+  // source_kind + reference_date + tz in the run prompt (the UNIT CONTEXT
+  // block), so a failed fetch must NOT abort the run — the agent proceeds on
+  // that prompt context and still writes the skill_data row. Degrade to an
+  // empty-sessions envelope instead of throwing, but report the miss
+  // non-silently so it stays visible in the run log.
+  // Scope the tolerance to a SINGLE-UNIT dispatcher re-fetch (--kbd-input /
+  // --session): only that can 404 on a dropped source row, and the run prompt
+  // carries the UNIT CONTEXT fallback. The windowed manual fetch (neither filter
+  // set) must still fail loudly — a genuine outage/auth error is not "no meetings".
+  const singleUnitRefetch = !!(kbdFilter || sessionFilter);
+  let data;
+  let fetchError = null;
+  try {
+    data = await httpGet(url, token);
+  } catch (e) {
+    if (!singleUnitRefetch) throw e;
+    fetchError = e.message;
+    console.error(`⚠️ fetch miss (${e.message}) — not aborting; fall back to the run-prompt UNIT CONTEXT.`);
+    data = null;
+  }
 
   // Normalize to a sessions array regardless of the server envelope shape.
   const isEnvelope = data && typeof data === 'object' && !Array.isArray(data);
@@ -284,6 +307,9 @@ async function doFetch(opts = {}, deps = {}) {
   // resolve "today" one day late. localAnchor() hands it reference_time (zoneless
   // local), reference_date, reference_weekday, and reference_time_utc (true instant).
   const out = { ...localAnchor(nowIso, tz), tz, ...base, sessions };
+  // Surface a degraded fetch in the emitted envelope too (not just stderr) so the
+  // agent can see the re-fetch missed and knowingly fall back to the UNIT CONTEXT.
+  if (fetchError) out.fetch_error = fetchError;
   if (deps.emit) deps.emit(out);
   else console.log(JSON.stringify(out, null, 2));
   return out;

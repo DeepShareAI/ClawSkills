@@ -67,7 +67,7 @@ reads the fetched transcripts and emits a JSON array of events.
 1. **Fetch** — `node scripts/calendar-extractor.js <userId> fetch` issues
    `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
    `OPENCLAW_GATEWAY_TOKEN` bearer and prints
-   `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`. If fetch fails, returns invalid JSON, or yields zero sessions, output an empty events array and do not push anything; report the failure only if the user asked for a diagnostic. If the fetch response contains no sessions or the transcript text is empty, return `[]` and do not attempt to push a digest.
+   `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`. If fetch fails, returns invalid JSON, or yields zero sessions, output an empty events array and do not push anything; report the failure only if the user asked for a diagnostic. If the fetch response contains no sessions or the transcript text is empty, return `[]` and do not attempt to push a digest. **Exception — the dispatcher path with a `UNIT CONTEXT` block (see "How this skill is invoked"): a failed single-unit `fetch --session`/`fetch --kbd-input` (empty/404, surfaced as `fetch_error` in the envelope) does NOT mean "emit nothing" — fall back to the prompt-embedded transcript/reference_date/tz and STILL extract and push.** (The `fetch` here degrades to an empty-sessions envelope rather than aborting, so the run continues.)
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
    `{ "title", "start_at" (ISO 8601), "end_at" (ISO 8601, optional), "location", "attendees" (array), "notes", "source_ref" (session_id), "source_kind" ("audio"|"keyboard", from the session's source), "lead_time" (minutes before start for the "Javis calls you" voice alert, optional — defaults to 10) }`.
    Carry `source_kind` through so provenance flows to the `/api/skill/data` mirror and the iOS digest.
@@ -191,14 +191,37 @@ This skill has **two triggers** (dispatcher auto-run and manual).
    read the unit transcript for full detail (time, attendees), and **this skill's own
    agent decides for itself, using this `SKILL.md`, whether the unit is worth acting
    on; if not, it does nothing.** When it does act, it parses `<unit>`
-   (`audio:<session_id>` or `kbd:<keyboard_input.id>`), runs `fetch --session <id>` /
-   `fetch --kbd-input <id>`, extracts events, and pushes them. **The human gate is not
+   (`audio:<session_id>` or `kbd:<keyboard_input.id>`), reads the embedded
+   **`UNIT CONTEXT`** block (below) for the transcript + `reference_date`/`tz` +
+   `source_ref`/`source_kind`, extracts events, and pushes them; `fetch --session <id>` /
+   `fetch --kbd-input <id>` is now an **optional enrichment** and a **failed fetch must
+   not abort the push**. **The human gate is not
    running the skill — it is Confirm/Discard on the produced events:** every extracted
    event is written **PENDING** to the calendar table (greyed/dashed with
    **Confirm · Discard**) and becomes solid only when the user taps **Confirm**
    (Discard deletes it). **The skill does not self-gate on Confirm/Discard** — the
    server owns run-once (whether to invoke at all), while the skill's own agent owns
    relevance (whether to act once invoked).
+
+   **`UNIT CONTEXT` block — prompt-embedded; use it directly.** The dispatcher
+   embeds the already-loaded unit in the run prompt, in a clearly delimited
+   `UNIT CONTEXT` section carrying `transcript`, `reference_date`, `tz`,
+   `source_ref`, and `source_kind`. **Use this embedded context as the source of
+   truth for extraction** — resolve relative times against its `reference_date`/
+   `tz`, and carry its `source_ref`/`source_kind` onto each extracted event
+   (`source_ref`/`source_kind` fields) so provenance flows through to the
+   `/api/skill/data` mirror. The `fetch` step is only an optional enrichment.
+   **If you still run `fetch --kbd-input <id>` / `fetch --session <id>` and it
+   returns empty/404** (the source row was dropped after dispatch — the envelope
+   carries `fetch_error` and zero sessions), **DO NOT abort and DO NOT emit an
+   empty array.** Fall back to the `UNIT CONTEXT` block and still extract + push,
+   so the event lands as a PENDING `/api/skill/data` row. Report the fetch miss
+   non-silently (mention it), but never let it suppress the write. For each
+   event's `source_ref`, use the `UNIT CONTEXT` `source_ref`/`source_kind` when
+   present; if absent, use the `<unit>` id itself (the `<session_id>` or
+   `<keyboard_input.id>`) as `source_ref`. This does **not** change the
+   `dedup_key` / pending-write / `lead_time` contract — only the source of the
+   extraction input when a re-fetch misses.
 2. **Manual ("today's meetings").** On demand, the agent runs the windowed
    `fetch` (last 24h by default) → extracts → pushes. Repeating the ask re-runs
    extraction on the window; the `seen` map still prevents duplicate delivery.

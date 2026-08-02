@@ -325,6 +325,78 @@ test('doPush resolves the SERVER zone when no deps.tz (fetchTz, not container UT
   assert.match(item.start_at, /Z$/, 'start_at is an absolute UTC instant with Z');
 });
 
+// ---- dispatcher resilience: a failing single-unit fetch must NOT abort ------
+// Spec: docs/superpowers/specs/2026-08-02-dispatch-prompt-embed-unit-context-
+// resilience-design.md — the dispatcher embeds the unit (transcript + source_ref
+// + source_kind + reference_date + tz) in the run prompt, so a re-fetch that 404s
+// (the source row was dropped after dispatch) must degrade to an empty-sessions
+// envelope rather than throw. The agent then falls back to the prompt UNIT
+// CONTEXT and STILL produces the /api/skill/data upsert (source_ref from prompt).
+test('doFetch degrades to an empty-sessions envelope on a failing fetch (no throw, anchor + fetch_error present)', async () => {
+  let emitted;
+  // httpGet rejects exactly as defaultHttpGet does on a 404 keyboard-input miss.
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: '1189', hours: 24, limit: 50, tz: TZ },
+    {
+      httpGet: async () => { throw new Error('GET /api/transcripts/keyboard-input/1189 -> HTTP 404'); },
+      now: NOW,
+      emit: (o) => { emitted = o; },
+    }
+  );
+  // Did NOT throw — degraded payload emitted with zero sessions.
+  assert.equal(emitted.sessions.length, 0, 'a failed fetch yields no sessions, not an abort');
+  // The miss is surfaced non-silently in the envelope so the agent can knowingly
+  // fall back to the run-prompt UNIT CONTEXT.
+  assert.match(emitted.fetch_error, /404/, 'the fetch miss is surfaced as fetch_error');
+  // The relative-date anchor is still emitted so extraction can resolve times.
+  assert.equal(emitted.reference_date, '2026-06-03');
+  assert.equal(emitted.tz, TZ);
+});
+
+test('failing fetch --kbd-input + prompt UNIT CONTEXT still produces the /api/skill/data upsert (source_ref from prompt)', async () => {
+  // 1) The dispatcher re-fetch 404s (source row dropped) — doFetch degrades
+  //    rather than aborting, so the run continues on the prompt UNIT CONTEXT.
+  let fetched;
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: '1189', hours: 24, limit: 50, tz: TZ },
+    {
+      httpGet: async () => { throw new Error('GET /api/transcripts/keyboard-input/1189 -> HTTP 404'); },
+      now: NOW,
+      emit: (o) => { fetched = o; },
+    }
+  );
+  assert.equal(fetched.sessions.length, 0);
+  assert.match(fetched.fetch_error, /404/);
+
+  // 2) The agent extracts from the prompt UNIT CONTEXT ("meeting at 1 PM today"),
+  //    carrying the prompt's source_ref/source_kind onto the event. The unit id
+  //    (kbd:1189 -> session_id 1189) is the source_ref supplied by the prompt.
+  const PROMPT_SOURCE_REF = '1189';
+  const events = [{
+    title: 'Meeting', startAt: '2026-06-03T20:00:00.000Z', endAt: null, // 1 PM PDT
+    location: null, attendees: [], notes: null,
+    sourceRef: PROMPT_SOURCE_REF, sourceKind: 'keyboard',
+  }];
+
+  // 3) push still writes the skill_data upsert — capture the exact items posted.
+  const { buildSkillDataItems } = require('../scripts/lib');
+  const recorded = { items: null };
+  const client = {
+    mirror: async (_token, evs, tz) => { recorded.items = buildSkillDataItems(evs, tz); },
+    push: async () => {},
+  };
+  const store = makeStore({ userId: 'self' });
+
+  await doPush({ token: 't', client, events, ...store, tz: TZ, now: NOW });
+
+  // The write happened (NOT "emitting nothing") and carries the prompt source_ref.
+  assert.ok(recorded.items, 'a failed fetch must not suppress the skill_data upsert');
+  assert.equal(recorded.items.length, 1);
+  assert.equal(recorded.items[0].source_ref, PROMPT_SOURCE_REF,
+    'source_ref rides through from the prompt UNIT CONTEXT');
+  assert.equal(recorded.items[0].status, 'pending', 'still a PENDING upsert (contract unchanged)');
+});
+
 test('doPush with an empty events array pushes nothing (empty-fetch path)', async () => {
   const client = makeClient();
   const store = makeStore({ userId: 'self' });

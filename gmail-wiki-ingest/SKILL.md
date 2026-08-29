@@ -1,6 +1,6 @@
 ---
 name: gmail-wiki-ingest
-description: Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container cron (agent turn), and on demand when the user asks to "ingest my email" / "gmail ingest" / "整理邮件". Two server tools do all the I/O — skill_candidates_fetch returns thread METADATA ONLY (never a body, never a snippet) plus the live wiki index, the user's recent decisions and a per-sender trusted flag; skill_candidates_submit takes one verdict per candidate. This SKILL.md owns the judgment — the category enum, the 0-1 relevance score, and the rule that a citation must be a slug already present in the returned index. It does NOT own the outcome — bands, sender trust, ref validation and every write stay server-side. If fetch returns no items, do nothing and say nothing. Triggers — 'ingest my email', 'gmail ingest', 'sync my inbox to the wiki', '整理邮件', '邮件入库'.
+description: Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on a javis-server-side trigger (agent turn), and on demand when the user asks to "ingest my email" / "gmail ingest" / "整理邮件". Two server tools do all the I/O — skill_candidates_fetch returns thread METADATA ONLY (never a body, never a snippet) plus the live wiki index, the user's recent decisions and a per-sender trusted flag; skill_candidates_submit takes one verdict per candidate. This SKILL.md owns the judgment — the category enum, the 0-1 relevance score, and the rule that a citation must be a slug already present in the returned index. It does NOT own the outcome — bands, sender trust, ref validation and every write stay server-side. If fetch returns no items, do nothing and say nothing. Triggers — 'ingest my email', 'gmail ingest', 'sync my inbox to the wiki', '整理邮件', '邮件入库'.
 keywords: ingest my email, gmail ingest, gmail wiki, sync my inbox to the wiki, 整理邮件, 邮件入库, gmail-wiki-ingest
 ---
 
@@ -15,9 +15,8 @@ keywords: ingest my email, gmail ingest, gmail wiki, sync my inbox to the wiki, 
 
 ## When to act
 
-- The daily cron fires (`/gmail-wiki-ingest`, see "Cron"). This is the normal
-  path and it is silent — the review cards in HiJavis are the output, not a
-  chat message.
+- The daily run fires (see "The trigger"). This is the normal path and it is
+  silent — the review cards in HiJavis are the output, not a chat message.
 - The user asks on demand: "ingest my email", "gmail ingest", "sync my inbox to
   the wiki", "整理邮件", "邮件入库".
 - **Never** on your own initiative inside some other turn. This skill reads the
@@ -27,7 +26,7 @@ There is deliberately **no `metadata.routes` block** in this file. Routes are
 what make the javis-server dispatcher auto-run a skill after every completed
 voice/keyboard unit — correct for calendar-extractor, wrong here: this skill has
 nothing to do with a transcript, and firing it per recording would poll Gmail
-dozens of times a day. The cron is the whole trigger story.
+dozens of times a day. The daily trigger is the whole trigger story.
 
 ## The two-call flow
 
@@ -76,8 +75,15 @@ Returns:
 around: the whole point of keeping the judging in the container is that raw mail
 stays on the server, and a Gmail snippet is a body excerpt. Judge from the
 subject, the sender, the thread size and the index. If a subject is too thin to
-judge, that *is* the judgment — score it low; do not go looking for the body
-through `gmail_search` or any other tool.
+judge, that *is* the judgment — score it low.
+
+Do not go looking for the body. On this turn there is nothing to look with:
+`gmail_search` and `gmail_get_message` exist on every other turn and are removed
+from this one, at advertisement *and* at execution — calling one anyway returns
+`{"error": "tool_not_available_for_this_skill"}` and reads nothing. That is not
+a restriction placed on you so much as the shape of the feature: the boundary
+had to be a gate rather than this paragraph, because the subject lines you are
+about to read are written by people who are not the user.
 
 ### 2. `skill_candidates_submit`
 
@@ -91,7 +97,7 @@ through `gmail_search` or any other tool.
 ] }
 ```
 
-Returns `{high, middle, low, unvalidated, acted: [...], rejected: [...]}`.
+Returns `{high, middle, low, unvalidated, dropped, uncovered, acted: [...], rejected: [...], promoted}`.
 
 **Call it exactly once per run, covering every item in the batch**, and only
 after you have judged all of them. Do not submit in pieces, and do not submit
@@ -113,6 +119,13 @@ For **each** candidate, decide four things. One verdict per item — including t
 junk. An item you leave out of `verdicts` is simply not judged, so it is offered
 again on the next run and again after that; an item you score low is *recorded*
 as a discard and teaches the ledger. Silence is not a "no".
+
+And an omission is not free for the rest of the batch. The server advances the
+sync watermark only on a submit that accounted for **every** item the fetch
+offered — an unjudged item has no row anywhere, so a watermark past it would
+lose the thread for good. One item left out therefore holds the whole batch's
+window open and the next run re-offers all of it. Judge everything, including
+the junk; `uncovered` in the result tells you how many you missed.
 
 ### (1) `category` — the enum, exactly one
 
@@ -210,9 +223,13 @@ Read the result before you decide the run went well.
   unusable category or score). Do not re-submit them. Note what was wrong.
 - `unvalidated` non-zero → refs stripped as unknown slugs. You invented a
   citation. Do not retry with a different guess; the fix is to cite less.
+- `uncovered` non-zero → items you were offered and did not judge. The
+  watermark was held for the whole batch and every item comes back next run.
+  Do not "fix" it with a second submit — that is a new, empty batch. Cover the
+  batch the first time.
 - `high` / `middle` / `low` → what actually happened to the batch.
 
-Then: on a **cron run, output nothing** (the cards are the delivery). On a
+Then: on a **scheduled run, output nothing** (the cards are the delivery). On a
 **manual ask**, one line is enough — how many were reviewed, how many queued for
 Confirm, how many auto-ingested. Never list the subjects back to the user; they
 have the cards.
@@ -226,48 +243,35 @@ have the cards.
 | `fetch` returns a non-`ok` status with no items | The scope is off, or there is nothing to do. Stop silently — the empty-batch rule. |
 | One thread is missing fields | Judge it on what is there, or score it low. Never drop the whole batch for one bad item. |
 | `submit` errors or never returns | Stop. **Do not retry the run from `fetch`** — nothing is lost, the watermark is not promoted, and the same threads are offered next time. Re-scanning is always safe; a double submit is not. |
-| A tool you need is absent | The turn is not gated to this skill. Say so; do not improvise. |
+| A tool you need is absent | If it is `skill_candidates_*`, the turn is not gated to this skill — say so; do not improvise. If it is `gmail_search` / `gmail_get_message`, they are removed from this turn deliberately (the content boundary) and there is nothing to say: judge from the metadata. |
 
-## Cron
+## The trigger
 
-Registered once, at skill-install time, in the user's own openclaw container
-(alongside the ClawHub auto-install). Daily, agent-turn payload:
+You are started, once a day, by javis-server — `app/workers/gmail_ingest_poller.py`
+calls `trigger_skill(user_id, "gmail-wiki-ingest")` for every user whose ingest
+is enabled, whose last run is more than a day old, and whose container is
+already running. Nothing inside the container schedules this skill.
 
-```bash
-openclaw cron add \
-  --name "gmail-wiki-ingest" \
-  --cron "0 7 * * *" \
-  --tz "<the user's IANA zone, when known>" \
-  --session isolated \
-  --no-deliver \
-  --message "Run /gmail-wiki-ingest: call skill_candidates_fetch, judge each candidate against SKILL.md, then call skill_candidates_submit once with one verdict per item. If fetch returns no items, do nothing and say nothing."
-```
+**It is deliberately not an `openclaw cron` job**, and the reason is worth
+knowing because it is the same reason the two tools work at all: they are
+*client tools*, present only in the `body.tools` of a request javis-server
+itself makes, and executed by javis-server intercepting the call on that same
+stream. A turn openclaw starts on its own — a cron agent-turn — has no such
+body, so `skill_candidates_fetch` is simply not there. A cron job would fire on
+schedule and hit the "a tool you need is absent" row of the error table every
+day. If you are ever asked to register one, say this rather than adding it.
 
-Four details, each load-bearing:
+**Daily means "daily, on the next sweep after the user is around again."** The
+container is reaped ~10 minutes after their last activity and the trigger only
+fires into a live container, so a dormant user's run waits for them. That is
+fine and arguably right: the sync is bounded by a content watermark rather than
+a clock, so a late run covers a longer window and loses nothing, and a dormant
+user finds their ingest waiting when they come back — which is when they want
+it.
 
-- **`--cron`, not `--schedule`.** `--schedule` and `--command` are not openclaw
-  flags; an argv built with them fails at creation time.
-- **The `/gmail-wiki-ingest` token in `--message`** is how javis-server's
-  `skills_with_cron` recognises the job as belonging to this skill (it scans the
-  job name and text for `/<skill>`). Rename the job freely; keep the token.
-- **`--no-deliver`.** The output of a run is review cards written server-side,
-  not a chat message. Announce delivery would turn a silent daily job into a
-  daily notification saying nothing.
-- **`--session isolated`** so a run never inherits, or pollutes, the user's
-  conversation.
-
-**Daily means "daily, on the next container start after it comes due."** The
-container is reaped ~10 minutes after the user's last activity and cron cannot
-wake it; `runMissedJobs` fires the overdue job **once** on the next start. That
-is fine here and arguably right: the sync is bounded by a content watermark
-rather than a clock, so a late run covers a longer window and loses nothing, and
-a dormant user finds their ingest waiting when they come back — which is when
-they want it.
-
-The user-facing on/off switch is **not** this cron. It is
-`gmail_ingest_scopes.enabled`, the row iOS writes; the cron always runs and
-`fetch` returns empty while the scope is disabled. Do not offer to remove the
-cron as a way to "turn ingest off", and do not add a second one.
+The user-facing on/off switch is `gmail_ingest_scopes.enabled`, the row iOS
+writes. It gates the trigger as well as `fetch`, so a disabled user costs no
+run at all.
 
 ## References
 
@@ -275,8 +279,9 @@ cron as a way to "turn ingest off", and do not add a second one.
   validation rule, the error table, and the cursor/watermark contract.
 - `references/banding-and-trust.md` — how a verdict becomes HIGH / MIDDLE / LOW,
   what sender trust is and how it is earned, and what the decision ledger keeps.
-- `references/cron-contract.md` — the canonical `openclaw cron add` argv, what
-  installs it, and the restart catch-up semantics.
+- `references/trigger-contract.md` — what starts a run, why it is a
+  server-side poller rather than an `openclaw cron` job, how to force one, and
+  the environment that tunes it.
 
 ## Notes
 

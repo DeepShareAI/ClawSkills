@@ -111,23 +111,48 @@ next. Normalizing catches the prefix case; dropping the rest keeps dangling
 references out of the review queue and out of the ledger that trains the next
 run.
 
-**Result** — `{high, middle, low, unvalidated, acted: [...], rejected: [...]}`.
+**Result** — `{high, middle, low, unvalidated, dropped, uncovered, acted: [...],
+rejected: [...], promoted}`.
 
 ## The cursor / watermark contract
 
-`fetch` writes `GmailIngestScope.pending_cursor_epoch`; `submit` promotes it to
-`cursor_epoch`. Nothing else promotes it.
+`fetch` writes `GmailIngestScope.pending_cursor_epoch` — the max internalDate
+over every thread the walk **scanned**, not just the ones it offered. It is
+promoted to `cursor_epoch` in exactly two places:
+
+1. **On `submit`**, when the pass raised nothing *and* accounted for every item
+   the fetch offered.
+2. **Inside `fetch` itself**, when the pass offered nothing at all and nothing
+   raised — the empty-batch rule means no `submit` is coming, and without this
+   a mailbox of pure newsletters would re-walk a widening window every day
+   forever.
+
+"Accounted for" means the item came out of `submit` with an outcome: HIGH,
+MIDDLE, LOW, or the category gate's hard drop. It does **not** include an item
+that was omitted from `verdicts` or one whose verdict was rejected — both leave
+the thread with no review row and no ledger row, so a promoted watermark would
+step past a thread nothing anywhere records having seen. `uncovered` in the
+result is the count, and a non-zero `uncovered` always means `promoted: false`.
 
 - Agent dies mid-turn → nothing promoted, next `fetch` overwrites the pending
   value and re-offers the same threads.
 - Agent never calls `submit` → same.
+- Agent submits half the batch → same, for the whole batch.
+- A malformed `arguments` blob decodes to `{}` and arrives as `verdicts: []`.
+  Without the coverage rule that reads as a clean pass and promotes the entire
+  batch away; with it, nothing moves.
 - A promoted cursor that skipped a thread is **unrecoverable and silent**, which
   is why the rule is one-directional: **re-scanning is always safe; skipping
   never is.** The E2E plan calls this its highest-severity case (TC9).
 
+The cost of holding is bounded and visible: an agent that mangles the same
+verdict every run pins the cursor and the listing window widens, which shows up
+as `uncovered=` on every `skill candidates: submit` log line. The cost of
+promoting wrongly is a thread nobody will ever see again.
+
 Idempotency sits underneath all of it: `gmail_ingested_threads.message_ids` is
 compared as a set — equal set skips, superset re-distils — so a double-fired
-cron or a re-submitted thread is a no-op, not a duplicate page.
+run or a re-submitted thread is a no-op, not a duplicate page.
 
 ## Errors
 
@@ -136,7 +161,7 @@ cron or a re-submitted thread is a no-op, not a duplicate page.
 | `GoogleAuthMissing` | `fetch` → `{error: "auth_missing"}`; the scope is disabled and its status set | report, stop |
 | `GmailScopeMissing` | `{error: "needs_reconnect"}`; the scope stays **enabled** so the GET endpoint can prompt re-consent | report, stop |
 | One thread's metadata fails | skipped and counted; the batch continues | judge the rest |
-| Malformed verdict | dropped into `rejected`; the rest of the batch still lands | do not re-submit |
+| Malformed verdict | dropped into `rejected`, counted in `uncovered`, and the watermark is held for the whole batch; the rest of the batch still lands | do not re-submit — the next run re-offers it |
 | Distillation fails inside `submit` | the row stays confirmed-but-undistilled; `_confirmed_but_never_distilled` retries next cycle | nothing to do |
 | Cron missed while the container was stopped | `runMissedJobs` fires it once on the next start | nothing to do |
 

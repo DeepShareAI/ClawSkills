@@ -1,10 +1,14 @@
-# gmail-wiki-ingest — server tool contract
+# gmail-wiki-ingest — server endpoint contract
 
-The wire shapes of the two tools this skill calls, and the rules the server
+The wire shapes of the two calls this skill makes, and the rules the server
 applies to what it is handed. It is the contract only — the implementation is
-javis-server's — the generic candidate core plus the gmail adapter, advertised
-through `OpenClawService._client_tool_definitions()` and executed in-process via
-`_LOCAL_TOOL_REGISTRY`.
+javis-server's — the generic candidate core plus the gmail adapter, reached over
+gateway-token HTTP from `scripts/gmail-wiki-ingest.js` and routed through
+`app/routers/skill_candidates.py`. An earlier revision made these openclaw
+client tools; that transport is unreachable from a cron turn (see
+`trigger-contract.md`). The payloads did not change with the transport — only
+the caller and the `skill` field, which the script pins and the server validates
+against its registered adapters.
 
 Design spec:
 `javis.is/docs/superpowers/specs/2026-08-28-gmail-wiki-ingest-skill-migration-design.md`
@@ -12,23 +16,33 @@ Design spec:
 
 ## Transport
 
-There is no HTTP here and no MCP. javis-server advertises the tools in
-`body.tools` on the request that starts the agent turn; the container's agent
-emits a call; javis-server intercepts `response.output_item.done` and executes
-the tool **in its own process**, against its own database session. The skill
-holds no credential — the turn is already authenticated, and `user_id` and the
-invoked `skill` are threaded from `trigger_skill`, never from tool arguments.
+Ordinary HTTP to javis-server, authenticated by the container's
+`OPENCLAW_GATEWAY_TOKEN` bearer — the same shape `POST /skill/data` and
+`/transcripts/recent` already use for calendar-extractor. The script makes the
+call; javis-server runs the work in its own process against its own database
+session.
 
-Two consequences the skill depends on:
+**What the token does and does not carry.** It identifies the **user**, not the
+skill: one token per container, shared by every skill installed in it. So the
+`skill` field travels in the request body, and two things follow that the skill
+depends on:
 
-1. **The agent cannot name a skill.** There is no `skill` parameter to pass. An
-   agent that invents one is ignored, so it cannot reach another skill's
-   candidates, ledger, or trust data.
-2. **The tools are gated on the invoked skill.** They are advertised on a
-   `gmail-wiki-ingest` turn and on no other. Their absence from the tool list
-   means the run is not what it claims to be.
+1. **The user cannot be redirected.** `user_id` comes from the token and is
+   never read from the body. A run can only ever touch its own user's mail,
+   ledger and wiki.
+2. **The skill CAN be named, and is validated rather than trusted.** The server
+   404s any slug no registered adapter claims. This is weaker than the client-
+   tool transport it replaced, where the skill was injected server-side and was
+   unnameable — a property a shared per-container token cannot reproduce. The
+   residual exposure is one user's own skills, never another user's data.
+   Restoring the stronger guarantee needs a per-skill credential, which does not
+   exist today.
 
-## `skill_candidates_fetch`
+`gmail_search` and `gmail_get_message` remain removed from this skill's
+server-initiated turns (the content boundary). A cron turn has no client tools
+at all, so on the daily run the question does not arise.
+
+## `fetch` → `POST /api/skill/candidates/fetch`
 
 **Arguments** — `{"limit": <int>}`, optional, default 25. **No paging, by
 design**: the source side is already bounded (Gmail is walked at most
@@ -76,7 +90,7 @@ filter lives **inside** the query, before the LIMIT. Filtering after the LIMIT
 would let a run of machine-written rows starve the window, and the model would
 end up learning from its own verdicts.
 
-## `skill_candidates_submit`
+## `submit` → `POST /api/skill/candidates/submit`
 
 **Arguments**
 

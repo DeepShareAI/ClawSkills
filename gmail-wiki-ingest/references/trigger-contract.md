@@ -10,15 +10,29 @@ by javis-server and reconciled on every default-skills pass
 (`app/services/skill_install_service.py::ensure_skill_cron`):
 
 ```
-openclaw cron add "0 7 * * *" "Run the gmail-wiki-ingest skill now." \
-  --name gmail-wiki-ingest-daily --agent main --no-deliver
+openclaw cron add \
+  --cron "0 7 * * *" \
+  --message "Run the gmail-wiki-ingest skill now." \
+  --name gmail-wiki-ingest-daily \
+  --agent main \
+  --session isolated \
+  --no-deliver \
+  --tz <the user's IANA zone>
 ```
+
+**Flags, not positionals.** openclaw's current docs show
+`cron add "<expr>" "<prompt>"`. The binary deployed in these containers
+(2026.5.12-beta.1) rejects that form and wants `--cron` / `--message`. Check the
+installed binary's `cron add --help`, not the repo docs — a cron that fails to
+register fails silently: no job, no daily run, no error anyone sees.
 
 | flag | why |
 |---|---|
 | `--name` | openclaw keys a job by name, so re-registration is a no-op rather than a duplicate. That is what makes the reconcile pass safe to run every sweep. |
 | `--agent main` | `cron add` warns and falls back to the default agent when omitted; pinning it keeps the turn in the session that has the skill loaded. |
-| `--no-deliver` | An isolated `cron add` job defaults to `--announce`. This skill's output is review cards the SERVER writes, so announcing would push the agent's own prose into the user's chat every morning — including on the empty-batch days when SKILL.md says to say nothing, which is exactly when a message is least wanted. |
+| `--no-deliver` | A cron job otherwise fallback-delivers the agent's final text to a chat. This skill's output is review cards the SERVER writes, so delivery would push the agent's own prose into the user's chat every morning — including on the empty-batch days when SKILL.md says to say nothing, which is exactly when a message is least wanted. |
+| `--session isolated` | Keeps the turn out of the user's main chat session, matching every agentTurn job already in a prod `jobs.json`. |
+| `--tz` | Cron expressions otherwise run in the container's local zone, which is UTC — "7am daily" would fire at midnight for a Pacific user. Comes from `User.timezone`; omitted entirely when unset, so openclaw's own default applies. |
 
 The job is registered whether or not the install step ran this pass: the
 install sentinel says the *bundle* is present, which is a different claim from
@@ -70,7 +84,12 @@ openclaw cron list                # the job, its schedule, last/next run
 openclaw cron run <job-id>        # force a run without waiting for the schedule
 ```
 
-Note that cron state lives in openclaw's shared SQLite state database. Legacy
-`config/cron/jobs.json` is imported once and renamed `.migrated`, so a reader
-that greps that file (javis-server's `cron_service.py` still does) will not see
-jobs created on a current openclaw.
+Cron state on the DEPLOYED version lives in
+`<user-data>/config/cron/jobs.json` (plus `jobs-state.json` for run state and a
+`runs/` directory) — verified on prod, where javis-server's `cron_service.py`
+reader is therefore correct today.
+
+A newer openclaw moves this into a shared SQLite state database and renames the
+legacy file `.migrated` after importing it once. When these containers update,
+that reader stops seeing jobs and will need to shell out to `openclaw cron list`
+instead. It is a scheduled break, not a current one.

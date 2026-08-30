@@ -12,7 +12,7 @@ by javis-server and reconciled on every default-skills pass
 ```
 openclaw cron add \
   --cron "0 7 * * *" \
-  --message "Run the gmail-wiki-ingest skill now." \
+  --message "<the fetch → judge → submit steps; see below>" \
   --name gmail-wiki-ingest-daily \
   --agent main \
   --session isolated \
@@ -33,6 +33,17 @@ register fails silently: no job, no daily run, no error anyone sees.
 | `--no-deliver` | A cron job otherwise fallback-delivers the agent's final text to a chat. This skill's output is review cards the SERVER writes, so delivery would push the agent's own prose into the user's chat every morning — including on the empty-batch days when SKILL.md says to say nothing, which is exactly when a message is least wanted. |
 | `--session isolated` | Keeps the turn out of the user's main chat session, matching every agentTurn job already in a prod `jobs.json`. |
 | `--tz` | Cron expressions otherwise run in the container's local zone, which is UTC — "7am daily" would fire at midnight for a Pacific user. Comes from `User.timezone`; omitted entirely when unset, so openclaw's own default applies. |
+
+**The message carries the steps, not just the skill name.** A cron turn is an
+isolated session started by openclaw's own timer — no dispatcher has told it
+which skill it is — so `"Run the gmail-wiki-ingest skill now."` would lean
+entirely on the agent finding this SKILL.md unaided. The only hand-written
+ClawSkills cron in production (`calendar-extractor-self`) does not take that
+bet: its message spells out `fetch` → extract → `push`. This one spells out
+`fetch` → judge → `submit`, restates the empty-batch rule, and says
+metadata-only. SKILL.md stays the authority on judgment; the message only has
+to get the agent into it. The exact text lives in
+`skill_install_service._SKILL_CRONS` and is pinned by tests.
 
 The job is registered whether or not the install step ran this pass: the
 install sentinel says the *bundle* is present, which is a different claim from
@@ -61,6 +72,14 @@ reaped roughly 10 minutes after the user's last activity
 (`GATEWAY_IDLE_TIMEOUT`), and cron cannot wake a stopped container. openclaw
 catches a missed job up once on its next start (`runMissedJobs` —
 `src/cron/service/timer.ts`), not once per skipped day.
+
+**How often that actually is, measured.** On prod (2026-08-30), 16 of ~20
+per-user containers were `Exited`, several for 6–8 weeks; only a handful were
+`Up`. The one hand-written calendar cron had never fired — its `jobs-state.json`
+was frozen at creation three months earlier — while an active user's cron state
+had been written that same week. So on any given day this trigger reaches the
+users who are already around, and everyone else gets their run on their next
+visit rather than on schedule.
 
 That is acceptable here because the sync is bounded by a **content watermark**
 (`gmail_ingest_scopes.cursor_epoch`), not by a clock: a late run covers a longer

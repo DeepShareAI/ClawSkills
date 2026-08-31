@@ -2,6 +2,7 @@
   "version": 2,
   "skills": [
     "calendar-extractor",
+    "gmail-wiki-ingest",
     "javis-brainstorming"
   ]
 }

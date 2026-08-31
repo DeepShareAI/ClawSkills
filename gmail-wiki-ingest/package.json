@@ -1,0 +1,22 @@
+{
+  "name": "gmail-wiki-ingest",
+  "version": "0.3.0",
+  "description": "Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container openclaw cron agent turn, and on demand. Two script commands (fetch / submit) call javis-server with the container's gateway token; bodies never leave the server, and bands, sender trust and every write stay server-side. Triggers: 'ingest my email', 'gmail ingest', '整理邮件', '邮件入库'.",
+  "keywords": [
+    "ingest my email",
+    "gmail ingest",
+    "gmail wiki",
+    "整理邮件",
+    "邮件入库",
+    "wiki"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "fetch": "node scripts/gmail-wiki-ingest.js fetch",
+    "submit": "node scripts/gmail-wiki-ingest.js submit",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

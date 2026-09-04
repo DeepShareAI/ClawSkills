@@ -1,7 +1,7 @@
 {
   "name": "gmail-wiki-ingest",
-  "version": "0.3.0",
-  "description": "Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container openclaw cron agent turn, and on demand. Two script commands (fetch / submit) call javis-server with the container's gateway token; bodies never leave the server, and bands, sender trust and every write stay server-side. Triggers: 'ingest my email', 'gmail ingest', '整理邮件', '邮件入库'.",
+  "version": "0.4.0",
+  "description": "Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container openclaw cron agent turn, and on demand. Three script commands (fetch / submit / report) call javis-server with the container's gateway token; bodies never leave the server, and bands, sender trust and every write stay server-side. Every run ends in one markdown digest pushed to the user's chat — the agent writes the headline, the script renders every server-issued fact and escapes every subject line. Triggers: 'ingest my email', 'gmail ingest', '整理邮件', '邮件入库'.",
   "keywords": [
     "ingest my email",
     "gmail ingest",

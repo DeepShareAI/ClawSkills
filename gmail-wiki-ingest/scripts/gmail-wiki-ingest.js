@@ -532,6 +532,7 @@ module.exports = {
   truncate,
   renderReport,
   renderFooter,
+  REPORT_EXIT_CODES,
   STATE_PATH,
   STALE_AFTER_MS,
   MAX_BULLETS,

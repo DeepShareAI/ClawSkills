@@ -1,6 +1,6 @@
 ---
 name: gmail-wiki-ingest
-description: Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container openclaw cron agent turn, and on demand when the user asks to "ingest my email" / "gmail ingest" / "整理邮件". Two script commands do all the I/O over the gateway token — `fetch` returns thread METADATA ONLY (never a body, never a snippet) plus the live wiki index, the user's recent decisions and a per-sender trusted flag; `submit` takes one verdict per candidate. This SKILL.md owns the judgment — the category enum, the 0-1 relevance score, and the rule that a citation must be a slug already present in the returned index. It does NOT own the outcome — bands, sender trust, ref validation and every write stay server-side. If fetch returns no items, do nothing and say nothing. Triggers — 'ingest my email', 'gmail ingest', 'sync my inbox to the wiki', '整理邮件', '邮件入库'.
+description: Triage a batch of the user's email against their personal knowledge wiki and hand the verdicts back to javis-server, which bands them into auto-ingest / review card / auto-discard. Runs daily on an in-container openclaw cron agent turn, and on demand when the user asks to "ingest my email" / "gmail ingest" / "整理邮件". Three script commands do all the I/O over the gateway token — `fetch` returns thread METADATA ONLY (never a body, never a snippet) plus the live wiki index, the user's recent decisions and a per-sender trusted flag; `submit` takes one verdict per candidate; `report` pushes the run digest to the user's chat. This SKILL.md owns the judgment — the category enum, the 0-1 relevance score, and the rule that a citation must be a slug already present in the returned index. It does NOT own the outcome — bands, sender trust, ref validation and every write stay server-side. Every run ends in a `report`, including a run that fetched nothing. Triggers — 'ingest my email', 'gmail ingest', 'sync my inbox to the wiki', '整理邮件', '邮件入库'.
 keywords: ingest my email, gmail ingest, gmail wiki, sync my inbox to the wiki, 整理邮件, 邮件入库, gmail-wiki-ingest
 ---
 
@@ -15,8 +15,9 @@ keywords: ingest my email, gmail ingest, gmail wiki, sync my inbox to the wiki, 
 
 ## When to act
 
-- The daily run fires (see "The trigger"). This is the normal path and it is
-  silent — the review cards in HiJavis are the output, not a chat message.
+- The daily run fires (see "The trigger"). This is the normal path — the review
+  cards in HiJavis are the outcome, and the `report` digest is how the user
+  learns the run happened at all.
 - The user asks on demand: "ingest my email", "gmail ingest", "sync my inbox to
   the wiki", "整理邮件", "邮件入库".
 - **Never** on your own initiative inside some other turn. This skill reads the
@@ -28,7 +29,7 @@ voice/keyboard unit — correct for calendar-extractor, wrong here: this skill h
 nothing to do with a transcript, and firing it per recording would poll Gmail
 dozens of times a day. The daily trigger is the whole trigger story.
 
-## The two-call flow
+## The three-call flow
 
 ```
 node scripts/gmail-wiki-ingest.js fetch   ──►  metadata + wiki index
@@ -41,9 +42,15 @@ echo '<verdicts>' | node scripts/gmail-wiki-ingest.js submit
         │
         ▼
    server validates → resolve_band → HIGH / MIDDLE / LOW
+        │
+        ▼
+echo '{"headline":"…"}' | node scripts/gmail-wiki-ingest.js report
+        │
+        ▼
+   one markdown digest into the user's Agent Chat — every run, no exceptions
 ```
 
-Both commands are thin HTTP calls to javis-server, authenticated with the
+All three commands are thin HTTP calls to javis-server, authenticated with the
 container's `OPENCLAW_GATEWAY_TOKEN`. The script does the I/O; you do the
 judging. It holds no logic you need to know beyond the shapes below.
 
@@ -114,14 +121,50 @@ after you have judged all of them. Do not submit in pieces, and do not submit
 twice — the second call is a fresh batch as far as the server is concerned, and
 `item_key`s it no longer recognises come back in `rejected`.
 
+### 3. `report`
+
+Pipe the digest's *prose* to stdin. Nothing else:
+
+`echo '{"headline":"…","notes":{…}}' | node scripts/gmail-wiki-ingest.js report`
+
+```jsonc
+{ "headline": "3 ingested, 2 to review",
+  "notes": { "<thread_id, verbatim from items>": "one line, optional" } }
+```
+
+Only `headline` is required, and it is capped at 120 characters. A `notes` entry
+renders as one indented line under its thread's bullet, also capped at 120; a
+key matching no thread in this run is dropped without comment.
+
+**You supply the prose and nothing else.** Every subject, every sender, every
+band, every counter in the rendered message comes out of the run-state file the
+`fetch` and `submit` calls wrote — the script re-reads what the *server* said
+and renders it. Do not retype a number you were given and do not paste a subject
+line into `headline`: a footer you transcribed is decorative rather than
+evidential, and a subject you paraphrased is no longer the subject the user
+received. The script also escapes every string it renders, yours included,
+because a batch of hostile subject lines is exactly what you have just finished
+reading.
+
+`report` refuses — and pushes nothing — when there is no run behind it: no state
+file (the `fetch` never landed) or a state file older than six hours. That
+refusal is correct. Do not work around it by re-running `fetch` to manufacture
+state; a report with no run behind it is a lie.
+
 ## The empty-batch rule
 
 If `items` is empty — a quiet mailbox, everything already handled, or the scope
-switched off in iOS — **do nothing and say nothing**. No `submit` call (there are
-no verdicts to submit), no chat message, no "I checked your email and found
-nothing". A daily silent job that narrates its own silence is a daily
-notification. The watermark for an empty pass is the server's bookkeeping, not
-yours.
+switched off in iOS — make **no `submit` call**. There are no verdicts to
+submit, and an empty submit would promote the cursor past a batch that was never
+offered.
+
+Then **call `report` anyway**, with a `headline` and no `notes`. This is the
+proof-of-life half of the run: a quiet mailbox and a broken sync look identical
+from the outside, and the only thing that tells them apart is a message that
+arrives saying nothing happened. The `fetch` counters are already in the run
+state, so the digest renders "nothing new" plus the real filter breakdown
+without you supplying a single number. The watermark for an empty pass is still
+the server's bookkeeping, not yours.
 
 ## The rubric
 
@@ -239,10 +282,16 @@ Read the result before you decide the run went well.
   batch the first time.
 - `high` / `middle` / `low` → what actually happened to the batch.
 
-Then: on a **scheduled run, output nothing** (the cards are the delivery). On a
-**manual ask**, one line is enough — how many were reviewed, how many queued for
-Confirm, how many auto-ingested. Never list the subjects back to the user; they
-have the cards.
+Then, always: **call `report`, once, on every run** — scheduled or manual, busy
+or empty, and even when `submit` errored. That call *is* the run's output. A
+missing message means the run did not happen, so a run you decline to report is
+indistinguishable from a container that never woke up.
+
+Beyond it: on a **scheduled run, output nothing** as your own final text (the
+digest is the delivery, and the cron job does not deliver your prose anyway). On
+a **manual ask**, one line is enough — how many were reviewed, how many queued
+for Confirm, how many auto-ingested. Never list the subjects back to the user;
+they have the cards and the digest.
 
 ## Errors
 
@@ -250,19 +299,21 @@ have the cards.
 |---|---|
 | `fetch` returns `{"error": "auth_missing"}` | Google is not connected. The server has already disabled the scope. Tell the user to connect Google in HiJavis, and stop. |
 | `fetch` returns `{"error": "needs_reconnect"}` | The Gmail read scope was not granted or was revoked. Tell the user to reconnect Google and re-grant read-only Gmail. Stop. |
-| `fetch` returns a non-`ok` status with no items | The scope is off, or there is nothing to do. Stop silently — the empty-batch rule. |
+| `fetch` returns `ok` with an empty `items` | Nothing to do this run: the scope is off, or the mailbox is quiet. Do not submit; do `report` — the empty-batch rule. |
+| `fetch` returns a non-`ok` status | The call did not land, so no run state was written and `report` will refuse with `no_recent_run`. That is right: silence beats a digest with no run behind it. Say what the error was and stop. |
 | One thread is missing fields | Judge it on what is there, or score it low. Never drop the whole batch for one bad item. |
-| `submit` errors or never returns | Stop. **Do not retry the run from `fetch`** — nothing is lost, the watermark is not promoted, and the same threads are offered next time. Re-scanning is always safe; a double submit is not. |
+| `submit` errors or never returns | **Do not retry the run from `fetch`** — nothing is lost, the watermark is not promoted, and the same threads are offered next time. Re-scanning is always safe; a double submit is not. Then `report` anyway: the run state still holds what `fetch` found, so the digest renders the fetch counters alone and the user learns the run was attempted. |
+| `report` returns `no_recent_run` or `stale_run` | There is no run behind the digest — the `fetch` never landed, or this turn is picking up state from a run that died hours ago. Nothing is pushed, and that is right. Say what happened and stop; do not re-run `fetch` to make the refusal go away. |
 | A command or tool you need is absent | If `scripts/gmail-wiki-ingest.js` is missing, the bundle is broken — say so; do not improvise. If it is `gmail_search` / `gmail_get_message`, they are removed from this turn deliberately (the content boundary) and there is nothing to say: judge from the metadata. |
 
 ## The trigger
 
 An **`openclaw cron` job in this container**, registered at skill-install time
 by javis-server (`skill_install_service.ensure_skill_cron`) and named
-`gmail-wiki-ingest-daily`. It fires an agent turn once a day and that turn runs
-this SKILL.md. Nothing on the server schedules you.
+`gmail-wiki-ingest-daily-v2`. It fires an agent turn once a day and that turn
+runs this SKILL.md. Nothing on the server schedules you.
 
-This is why the two commands are HTTP calls rather than server tools. A turn
+This is why the three commands are HTTP calls rather than server tools. A turn
 openclaw starts on its own timer gets no `body.tools` from javis-server, so a
 client tool would simply be absent — the transport had to be one a cron turn can
 reach, and a script holding the gateway token is that.
@@ -278,8 +329,8 @@ it.
 
 The user-facing on/off switch is `gmail_ingest_scopes.enabled`, the row iOS
 writes. The cron always fires; `fetch` returns an empty batch when the scope is
-off, and the empty-batch rule then applies — so a disabled user gets silence,
-not a message.
+off, and the empty-batch rule then applies — so a disabled user gets a
+one-line "nothing new" rather than a run they cannot see.
 
 ## References
 
@@ -287,15 +338,18 @@ not a message.
   validation rule, the error table, and the cursor/watermark contract.
 - `references/banding-and-trust.md` — how a verdict becomes HIGH / MIDDLE / LOW,
   what sender trust is and how it is earned, and what the decision ledger keeps.
-- `references/trigger-contract.md` — what starts a run, why it is a
-  server-side poller rather than an `openclaw cron` job, how to force one, and
-  the environment that tunes it.
+- `references/trigger-contract.md` — what starts a run, why it is an
+  `openclaw cron` job in this container rather than a server-side poller, how to
+  force one, and the environment that tunes it.
 
 ## Notes
 
-- **No `scripts/`.** This skill shells out to nothing. All I/O is the two server
-  tools; there is no Node runtime, no `npm install`, no local state file, and no
-  gateway token to handle.
+- **The skill IS a script.** `scripts/gmail-wiki-ingest.js` runs on the
+  container's Node (>=18, no dependencies, no `npm install`) and holds the
+  gateway token; there are no server-side client tools to call, because a cron
+  turn is never handed any. It keeps one local file, `data/last-run.json` — the
+  run state the digest is rendered from — which `report` deletes once the push
+  lands.
 - **Two names, neither typed by you.** The ClawHub slug is `gmail-wiki-ingest`;
   the key the server stamps on rows and ledger entries is `gmail-wiki`. Both are
   bound server-side from the invoked skill.

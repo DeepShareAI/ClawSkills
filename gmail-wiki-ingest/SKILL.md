@@ -144,7 +144,9 @@ line into `headline`: a footer you transcribed is decorative rather than
 evidential, and a subject you paraphrased is no longer the subject the user
 received. The script also escapes every string it renders, yours included,
 because a batch of hostile subject lines is exactly what you have just finished
-reading.
+reading. That escaping is visible in one place: a URL is dropped outright and an
+address renders as `ada at x.com`, because the chat renderer autolinks both out
+of plain text and nothing in a daily digest should be tappable.
 
 `report` refuses — and pushes nothing — when there is no run behind it: no state
 file (the `fetch` never landed) or a state file older than six hours. That

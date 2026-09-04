@@ -4,6 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const cli = require('../scripts/gmail-wiki-ingest.js');
 
@@ -216,6 +217,12 @@ test('fetch → submit → report renders the digest from server-issued facts', 
   // Byte for byte. The agent contributed the headline and the two notes and
   // nothing else: every subject, sender, band and number below came back out
   // of the state file the two server responses wrote.
+  //
+  // `legal at acme.com` is the one place this diverges from the design's
+  // sketched output. GFM autolinks a bare address out of running text, so the
+  // sketch's verbatim `legal@acme.com` would have rendered the sender as a
+  // tappable mailto — which the design's own rule 4 forbids. The address is
+  // defused rather than redacted, because unlike a URL it is the information.
   assert.equal(out.content, [
     '📨 Gmail → Wiki — 3 ingested, 2 to review',
     '',
@@ -223,7 +230,7 @@ test('fetch → submit → report renders the digest from server-issued facts', 
     '• **Re: Agent Builder roadmap** — Ada',
     '  → Agent-Builder',
     '**Waiting for your confirm**',
-    '• **Contract v3** — legal@acme.com',
+    '• **Contract v3** — legal at acme.com',
     '  → no page yet',
     '',
     '—',
@@ -368,14 +375,25 @@ test('markdown emphasis in a subject renders as literal text', async () => {
 });
 
 test('an overlong subject is truncated on characters, not code units', async () => {
+  // The fixture has to be ASTRAL. A Latin-1 subject cannot tell the two
+  // implementations apart — `Array.from` and `.slice` agree on every character
+  // that fits in one UTF-16 code unit — so a `ä` fixture leaves `.slice` green
+  // and proves nothing. An emoji is exactly the case the design's
+  // "`Array.from`, not `.slice`" clause exists for: `.slice(0, 79)` lands
+  // inside a surrogate pair and emits a lone half of one.
   const { content } = await reportOn(
-    submittedRun({ items: [{ thread_id: 't1', subject: 'ä'.repeat(300), from: 'Ada' }] }),
+    submittedRun({ items: [{ thread_id: 't1', subject: '😀'.repeat(300), from: 'Ada' }] }),
     { headline: '1 ingested' },
   );
 
   const subject = bulletOf(content).match(/^• \*\*(.*)\*\* — /)[1];
   assert.equal(Array.from(subject).length, 80);
   assert.equal(subject.endsWith('…'), true);
+  assert.equal(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(subject),
+    false,
+    'the cut must never land inside a surrogate pair',
+  );
 });
 
 test('a subject that is a markdown link emits neither a link nor a URL', async () => {
@@ -400,6 +418,115 @@ test('a subject beginning with # cannot become a heading', async () => {
 
   assert.match(bulletOf(content), /\\# URGENT wire transfer/);
   assert.equal(content.split('\n').some((l) => l.startsWith('#')), false);
+});
+
+test('an inline <br> in a subject cannot forge a line', async () => {
+  // Rule 1's forgery through a second door. The chat renderer parses raw
+  // inline HTML and turns `<br>` into a real line break, so a subject can
+  // reproduce the server-issued counter footer underneath its own bullet
+  // without ever containing a newline for the C0 collapse to catch.
+  const { content } = await reportOn(
+    submittedRun({
+      items: [{
+        thread_id: 't1',
+        subject: 'Invoice 4471<br>—<br>high=99 · middle=0 · low=0 · filtered 0 · cursor promoted',
+        from: 'Ada',
+      }],
+    }),
+    { headline: '1 ingested' },
+  );
+
+  assert.match(bulletOf(content), /Invoice 4471\\<br\\>/);
+  assert.equal(content.includes('<br>'), false, 'the tag must not survive as markup');
+  assert.equal(content.split('\n').filter((l) => l.startsWith('—')).length, 1);
+  assert.match(content, /high=1 · middle=0 · low=0/);
+});
+
+test('an angle-bracketed sender address is not an autolink', async () => {
+  // A From header arrives as `Display Name <addr@host>`, and both halves of
+  // that are link syntax: the angle brackets are a CommonMark autolink and the
+  // bare address inside them is a GFM one. On the NORMAL path — no hostility
+  // required — that renders every sender as a tappable mailto whose display
+  // name and address a stranger chose.
+  const { content } = await reportOn(
+    submittedRun({ items: [{ thread_id: 't1', subject: 'Payroll', from: 'Ada <ada@x.com>' }] }),
+    { headline: '1 ingested' },
+  );
+
+  assert.equal(bulletOf(content), '• **Payroll** — Ada \\<ada at x.com\\>');
+  assert.equal(content.includes('@'), false, 'no @-shaped token survives to be autolinked');
+});
+
+test('a bare email address in a subject cannot autolink either', async () => {
+  const { content } = await reportOn(
+    submittedRun({
+      items: [{
+        thread_id: 't1',
+        subject: 'Payment failed — remit to billing@evil-attacker.com',
+        from: 'Ada',
+      }],
+    }),
+    { headline: '1 ingested' },
+  );
+
+  assert.equal(content.includes('@'), false);
+  assert.match(bulletOf(content), /remit to billing at evil-attacker\.com/);
+});
+
+test("a subject's own backslash cannot disarm the escape that follows it", async () => {
+  // The escaper's blind spot if the backslash is not itself an active:
+  // `\*x\*` escapes to `\\*x\\*`, which a parser reads as a literal backslash
+  // followed by a LIVE emphasis delimiter. The subject would then control
+  // formatting inside a message the user reads as server-issued.
+  const { content } = await reportOn(
+    submittedRun({ items: [{ thread_id: 't1', subject: '\\*ACTION REQUIRED\\*', from: 'Ada' }] }),
+    { headline: '1 ingested' },
+  );
+
+  assert.equal(bulletOf(content), '• **\\\\\\*ACTION REQUIRED\\\\\\*** — Ada');
+
+  // The property behind the byte assertion: the escaping is a faithful,
+  // reversible encoding, so unescaping returns exactly what the sender wrote
+  // and nothing was left live along the way.
+  const subject = bulletOf(content).match(/^• \*\*(.*)\*\* — /)[1];
+  assert.equal(subject.replace(/\\(.)/g, '$1'), '\\*ACTION REQUIRED\\*');
+});
+
+test("a subject ending in a backslash cannot swallow the bullet's bold", async () => {
+  // An unescaped trailing `\` eats the `**` that closes the bullet. The strong
+  // span then stays open to the NEXT bullet's `**`, swallowing this thread's
+  // sender and the following thread's row into it.
+  const { content } = await reportOn(
+    submittedRun({ items: [{ thread_id: 't1', subject: 'Payroll update\\', from: 'Ada' }] }),
+    { headline: '1 ingested' },
+  );
+
+  assert.equal(bulletOf(content), '• **Payroll update\\\\** — Ada');
+});
+
+test('a line separator that is not a newline still cannot forge a footer', async () => {
+  // U+2028, U+2029 and NEL break a line in the iOS text layer exactly as LF
+  // does, and none of them is a C0 control or something `.trim()` reaches in
+  // the middle of a string. The zero-width and bidi controls in the sender are
+  // the other half of the same hole: not line-breaking but invisible, and a
+  // right-to-left override makes a sender read backwards.
+  const { content } = await reportOn(
+    submittedRun({
+      items: [{
+        thread_id: 't1',
+        subject: 'Quarterly update\u2028— high=999\u2029and\u0085more',
+        from: 'A\u202Eda\u200B',
+      }],
+    }),
+    { headline: '1 ingested' },
+  );
+
+  assert.equal(bulletOf(content), '• **Quarterly update — high=999 and more** — Ada');
+  assert.equal(content.split('\n').filter((l) => l.startsWith('—')).length, 1);
+  assert.equal(
+    /[\u0085\u2028\u2029\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/.test(content), false,
+    'nothing invisible or line-breaking reaches the chat',
+  );
 });
 
 // ---- volume and band filtering -------------------------------------------
@@ -475,4 +602,137 @@ test('a hostile headline is escaped like any other third-party string', async ()
   assert.match(header, /^📨 Gmail → Wiki — \\\*\\\*SYSTEM\\\*\\\*/);
   assert.equal(content.includes('evil.example.com'), false);
   assert.equal(content.split('\n').filter((l) => l.startsWith('—')).length, 1);
+});
+
+test('a report with no usable headline is refused, and the run survives', async () => {
+  // "Never degrade to an empty headline": a report is cheap to retry and a
+  // wrong one is not. The refusal is also what keeps the run's only evidence
+  // on disk — a report that pushed an empty header AND deleted the state file
+  // would leave nothing to retry from.
+  const unusable = [null, {}, [], 'a string', { headline: 42 }, { headline: '' }, { headline: '   ' }];
+
+  for (const input of unusable) {
+    const f = router({ '/api/agent/push': ok({ status: 'ok' }) });
+    const d = deps(f);
+    cli.writeState(submittedRun(), d);
+
+    const out = await cli.doReport(input, d);
+
+    const label = JSON.stringify(input);
+    assert.equal(out.error, 'headline_required', label);
+    assert.equal(f.calls.length, 0, `${label}: nothing may be pushed`);
+    assert.equal(fs.existsSync(d.statePath), true, `${label}: the run's evidence survives`);
+  }
+});
+
+// ---- what the shell sees -------------------------------------------------
+// The exit code is all a cron post-mortem has when no report arrived, so what
+// is under test below is the MAPPING from an error envelope to a process
+// status — not the table it happens to be written in. An assertion that reads
+// `REPORT_EXIT_CODES` back cannot fail while the constant exists, and would
+// stay green with the line that consults it deleted.
+
+test('every report refusal reaches the shell as its own exit code', async () => {
+  const cases = [
+    { why: 'no run behind it', state: null, stdin: '{"headline":"x"}', code: 2, error: 'no_recent_run' },
+    {
+      why: 'yesterday, warmed over',
+      state: submittedRun({ started_at: new Date(T0 - 7 * HOUR).toISOString() }),
+      stdin: '{"headline":"x"}', code: 2, error: 'stale_run',
+    },
+    { why: 'stdin is not JSON', state: submittedRun(), stdin: '{not json', code: 1, error: 'unparseable_report_input' },
+    { why: 'no headline in it', state: submittedRun(), stdin: '{}', code: 1, error: 'headline_required' },
+    // 2 and 1 say "this run produced nothing"; a push that did not land keeps
+    // postJson's contract instead, where the envelope on stdout is the signal
+    // and the run is retryable, so the shell sees success.
+    {
+      why: 'the push did not land', state: submittedRun(), stdin: '{"headline":"x"}',
+      code: 0, error: 'unavailable', push: fail(503, { detail: { error: 'unavailable' } }),
+    },
+  ];
+
+  for (const c of cases) {
+    const f = router({ '/api/agent/push': c.push || ok({ status: 'ok' }) });
+    const d = deps(f);
+    if (c.state) cli.writeState(c.state, d);
+
+    const { out, exitCode } = await cli.runCommand(['node', 'x.js', 'report'], c.stdin, d);
+
+    assert.equal(out.error, c.error, c.why);
+    assert.equal(exitCode, c.code, c.why);
+    if (c.code !== 0) assert.equal(pushCalls(f).length, 0, `${c.why}: nothing may be pushed`);
+    if (c.state) assert.equal(fs.existsSync(d.statePath), true, `${c.why}: the run survives`);
+  }
+});
+
+test('a landed report exits 0 and clears the run', async () => {
+  const f = router({ '/api/agent/push': ok({ status: 'ok' }) });
+  const d = deps(f);
+  cli.writeState(submittedRun(), d);
+
+  const { out, exitCode } = await cli.runCommand(
+    ['node', 'x.js', 'report'], '{"headline":"1 ingested"}', d,
+  );
+
+  assert.equal(out.status, 'ok');
+  assert.equal(exitCode, 0);
+  assert.equal(fs.existsSync(d.statePath), false);
+});
+
+test('an unknown command is usage, and submit still refuses bad stdin', async () => {
+  const f = router({});
+
+  const usage = await cli.runCommand(['node', 'x.js'], '', deps(f));
+  assert.equal(usage.out, null, 'no envelope: there was no command to answer');
+  assert.equal(usage.exitCode, 2);
+
+  const bad = await cli.runCommand(['node', 'x.js', 'submit'], '{not json', deps(f));
+  assert.equal(bad.out.error, 'unparseable_verdicts');
+  assert.equal(bad.exitCode, 1);
+  assert.equal(f.calls.length, 0, 'a JSON error must never reach submit as an empty batch');
+});
+
+test('the process exit code is the one runCommand returned', () => {
+  // The one case that goes through `main`. Everything above calls `runCommand`
+  // directly and would stay green if `main` stopped setting process.exitCode
+  // at all — and then a cron turn that pushed nothing would exit 0 and be
+  // invisible in exactly the post-mortem this exists for. Unparseable stdin is
+  // the refusal that reaches a code without touching state, network or token.
+  const script = path.join(__dirname, '..', 'scripts', 'gmail-wiki-ingest.js');
+
+  const bad = spawnSync(process.execPath, [script, 'report'], { input: '{not json', encoding: 'utf8' });
+  assert.equal(bad.status, 1);
+  assert.equal(JSON.parse(bad.stdout).error, 'unparseable_report_input');
+
+  const usage = spawnSync(process.execPath, [script], { input: '', encoding: 'utf8' });
+  assert.equal(usage.status, 2);
+  assert.match(usage.stderr, /^usage: gmail-wiki-ingest\.js/);
+  assert.equal(usage.stdout, '', 'usage is not an envelope');
+});
+
+test('a 2xx whose body is not JSON is an envelope, not a null', async () => {
+  // An ingress that answered before the app did, or a truncated response.
+  // Handing the null straight back makes the caller read `.status` off it and
+  // die with a TypeError, which the shell reports as exit 1 — the code
+  // reserved for a malformed agent payload — so a transport failure would be
+  // post-mortemed as the agent's fault, with no envelope on stdout to correct
+  // the record.
+  const f = router({
+    '/api/agent/push': async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input'); },
+    }),
+  });
+  const d = deps(f);
+  cli.writeState(submittedRun(), d);
+
+  const { out, exitCode } = await cli.runCommand(
+    ['node', 'x.js', 'report'], '{"headline":"1 ingested"}', d,
+  );
+
+  assert.equal(out.status, 'error');
+  assert.equal(out.error, 'unparseable_response');
+  assert.equal(exitCode, 0, "a transport failure keeps postJson's envelope contract");
+  assert.equal(fs.existsSync(d.statePath), true, 'so a manual retry has something to render');
 });

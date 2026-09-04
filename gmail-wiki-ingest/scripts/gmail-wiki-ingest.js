@@ -84,6 +84,13 @@ function nowIso(deps) {
  * mailbox is empty" from "the call failed", and an exception mid-turn reads to
  * it as neither. The one exception is a missing token, which is a broken
  * container rather than a runtime state and should stop the run loudly.
+ *
+ * It never returns a bare `null`. A 2xx whose body is not JSON — an ingress
+ * that answered before the app did, a truncated response — is a transport
+ * failure wearing a success code, and handing `null` back to a caller that is
+ * about to read `.status` off it turns that into a TypeError two frames later,
+ * which the shell then reports with the exit code reserved for a malformed
+ * agent payload.
  */
 async function postJson(path, body, deps = {}) {
   const fetchFn = deps.fetch || globalThis.fetch;
@@ -114,6 +121,9 @@ async function postJson(path, body, deps = {}) {
       error: (parsed && parsed.detail && parsed.detail.error) || `http_${res.status}`,
       detail: parsed,
     };
+  }
+  if (parsed == null || typeof parsed !== 'object') {
+    return { status: 'error', error: 'unparseable_response', detail: `http_${res.status}` };
   }
   return parsed;
 }
@@ -263,26 +273,61 @@ const MAX_PROSE_CHARS = 120;   // headline, notes
 // get escaped along with everything else.
 const URL_RE = /(?:[a-z][a-z0-9+.-]*:\/\/|www\.|mailto:|data:|javascript:)\S*/gi;
 
-const MD_ACTIVE_RE = /[*_[\]()`]/g;
+// GFM autolinks a *bare* address out of running text — `billing@evil.example`
+// becomes a tappable mailto with no markdown syntax anywhere in the subject —
+// and an escape cannot reach inside a text run the autolinker post-processes.
+// So the `@` goes, and only the `@`: unlike a URL, the address IS the
+// information (a From header is mostly address), so it is defused in place
+// rather than redacted the way `(link removed)` redacts a URL.
+const EMAIL_RE =
+  /([^\s@<>()[\]",;:]+)@([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)/gi;
+
+// The backslash is FIRST in the class, and it is the whole reason this is one
+// pass instead of two. A subject that supplies its own `\` before an active
+// character would otherwise consume the escape we are about to add — `\*x\*`
+// escaping to `\\*x\\*` reads as a literal backslash plus live emphasis — so
+// the escaper's own escape has to be escapable, and every active has to be
+// visited exactly once.
+//
+// `<` and `>` are in the set for two separate reasons: an inline `<br>` is raw
+// HTML the chat renderer turns into a real line break (rule 1's forgery, by
+// another door), and `<ada@x.com>` is a CommonMark autolink, which is how a
+// From header would otherwise render as a tappable link.
+const MD_ACTIVE_RE = /[\\*_[\]()`<>]/g;
+
+// Characters that can start a new line where none was written. CR and LF are
+// the obvious pair, but the iOS text layer breaks on U+2028, U+2029 and NEL
+// (U+0085) too, and `.trim()` alone does not remove them from the middle of a
+// string — so a subject carrying one still forges a counter footer.
+const LINE_BREAKING_RE = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g;
+
+// Characters that are invisible or reorder what surrounds them: zero-width
+// spaces and joiners hide a boundary, the bidi overrides make a sender read
+// backwards. Neither belongs in a header, and neither is escapable — they are
+// not syntax, they are the rendering.
+const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
 
 function sanitize(value, max) {
   let s = String(value == null ? '' : value);
 
   // 4. Never a link and never a bare URL. Escaping the brackets below kills
-  //    markdown link syntax, but GFM autolinks a naked `https://…` or `www.…`
-  //    from the text itself, where an escape cannot reach it. The only defence
-  //    is to not emit the sequence.
-  s = s.replace(URL_RE, '(link removed)');
+  //    markdown link syntax, but GFM autolinks a naked `https://…`, `www.…` or
+  //    `name@host.tld` out of the text itself, where an escape cannot reach
+  //    it. The only defence is to not emit the sequence.
+  s = s.replace(URL_RE, '(link removed)').replace(EMAIL_RE, '$1 at $2');
 
-  // 1. CR, LF and the C0 controls collapse to a single space. A newline inside
-  //    a subject otherwise forges a bullet of its own, or a whole counter
-  //    footer, in a message the user reads as server-issued.
-  s = s.replace(/[\u0000-\u001F]+/g, ' ').trim();
+  // 1. Anything that could break a line collapses to a single space, and
+  //    anything invisible is dropped outright. A newline inside a subject
+  //    otherwise forges a bullet of its own, or a whole counter footer, in a
+  //    message the user reads as server-issued.
+  s = s.replace(LINE_BREAKING_RE, ' ').replace(INVISIBLE_RE, '').trim();
 
-  // 2. The markdown actives, then any leading `#`, `>` or `-` — the three that
-  //    turn a line into a heading, a quote or a list item.
+  // 2. The markdown actives — the backslash among them, so that a subject
+  //    cannot supply the escape that disarms our own — then any leading `#`
+  //    or `-`, which turn a line into a heading or a list item. `>`, the
+  //    third, is escaped as an active above.
   s = s.replace(MD_ACTIVE_RE, (c) => `\\${c}`);
-  s = s.replace(/^[#>-]+/, (run) => run.replace(/./g, (c) => `\\${c}`));
+  s = s.replace(/^[#-]+/, (run) => run.replace(/./g, (c) => `\\${c}`));
 
   // 3. Truncate on grapheme-ish units rather than UTF-16 code units: `.slice`
   //    on a subject full of emoji or CJK cuts a surrogate pair in half and
@@ -454,17 +499,27 @@ function readStdin() {
   });
 }
 
-async function main() {
-  const { cmd, flag } = parseArgv(process.argv);
+/**
+ * The whole dispatch, one frame below process.argv and process.exitCode.
+ *
+ * It is split out of `main` because the exit code is a contract, not a detail:
+ * a cron turn that produced no report is diagnosable from it alone, and a
+ * table asserted against itself proves nothing about the code that reads it.
+ * Everything the shell observes is decided here and returned; `main` only
+ * prints it. `stdin` arrives as a string because a command that does not read
+ * stdin must not block waiting for one.
+ *
+ * `out === null` means the argv named no command, and is the usage case.
+ */
+async function runCommand(argv, stdin, deps = {}) {
+  const { cmd, flag } = parseArgv(argv);
+  const raw = String(stdin == null ? '' : stdin).trim();
 
   if (cmd === 'fetch') {
-    const out = await doFetch({ limit: flag('limit', '25') });
-    console.log(JSON.stringify(out, null, 2));
-    return;
+    return { out: await doFetch({ limit: flag('limit', '25') }, deps), exitCode: 0 };
   }
 
   if (cmd === 'submit') {
-    const raw = (await readStdin()).trim();
     let verdicts;
     try {
       verdicts = raw ? JSON.parse(raw) : [];
@@ -473,43 +528,46 @@ async function main() {
       // an empty submit is a meaningful message (the batch was judged and
       // nothing was worth keeping) and it promotes the cursor past every item
       // in the batch. Silently turning a JSON error into that would skip mail.
-      console.log(JSON.stringify(
-        { status: 'error', error: 'unparseable_verdicts', detail: e.message },
-        null, 2,
-      ));
-      process.exitCode = 1;
-      return;
+      return {
+        out: { status: 'error', error: 'unparseable_verdicts', detail: e.message },
+        exitCode: 1,
+      };
     }
-    const out = await doSubmit(verdicts);
-    console.log(JSON.stringify(out, null, 2));
-    return;
+    return { out: await doSubmit(verdicts, deps), exitCode: 0 };
   }
 
   if (cmd === 'report') {
-    const raw = (await readStdin()).trim();
     let input;
     try {
       input = raw ? JSON.parse(raw) : null;
     } catch (e) {
-      console.log(JSON.stringify(
-        { status: 'error', error: 'unparseable_report_input', detail: e.message },
-        null, 2,
-      ));
-      process.exitCode = 1;
-      return;
+      return {
+        out: { status: 'error', error: 'unparseable_report_input', detail: e.message },
+        exitCode: 1,
+      };
     }
-    const out = await doReport(input);
-    console.log(JSON.stringify(out, null, 2));
-    if (out.status === 'error') process.exitCode = REPORT_EXIT_CODES[out.error] || 0;
-    return;
+    const out = await doReport(input, deps);
+    const exitCode = out && out.status === 'error' ? (REPORT_EXIT_CODES[out.error] || 0) : 0;
+    return { out, exitCode };
   }
 
-  console.error(
-    'usage: gmail-wiki-ingest.js fetch [--limit N]'
-    + ' | submit  (verdicts JSON on stdin)'
-    + ' | report  ({"headline":"…","notes":{…}} on stdin)'
-  );
-  process.exitCode = 2;
+  return { out: null, exitCode: 2 };
+}
+
+const USAGE = 'usage: gmail-wiki-ingest.js fetch [--limit N]'
+  + ' | submit  (verdicts JSON on stdin)'
+  + ' | report  ({"headline":"…","notes":{…}} on stdin)';
+
+async function main() {
+  const { cmd } = parseArgv(process.argv);
+  // Only the two commands with a stdin contract wait for one. Reading it
+  // unconditionally would hang `fetch` on a terminal that never closes it.
+  const stdin = (cmd === 'submit' || cmd === 'report') ? await readStdin() : '';
+
+  const { out, exitCode } = await runCommand(process.argv, stdin);
+  if (out === null) console.error(USAGE);
+  else console.log(JSON.stringify(out, null, 2));
+  if (exitCode) process.exitCode = exitCode;
 }
 
 if (require.main === module) {
@@ -520,6 +578,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  runCommand,
   doFetch,
   doSubmit,
   doReport,

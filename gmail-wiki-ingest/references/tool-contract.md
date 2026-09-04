@@ -1,7 +1,10 @@
 # gmail-wiki-ingest — server endpoint contract
 
-The wire shapes of the two calls this skill makes, and the rules the server
-applies to what it is handed. It is the contract only — the implementation is
+The wire shapes of the two candidate calls this skill makes — `fetch` and
+`submit` — and the rules the server applies to what it is handed. (The third
+call, `report`'s `POST /api/agent/push`, is an existing generic endpoint that
+needed no change for this skill; its contract is the daily-report design spec's,
+not this file's.) It is the contract only — the implementation is
 javis-server's — the generic candidate core plus the gmail adapter, reached over
 gateway-token HTTP from `scripts/gmail-wiki-ingest.js` and routed through
 `app/routers/skill_candidates.py`. An earlier revision made these openclaw

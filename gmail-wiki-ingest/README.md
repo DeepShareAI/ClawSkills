@@ -60,6 +60,7 @@ Open your HiJavis chat and say any of these:
 - **It reads almost nothing.** Until you approve a thread, it has only seen the envelope — the sender, the subject, the date. The message itself stays on the server, and never reaches the part that does the judging.
 - **It never asks twice.** A thread you've answered doesn't come back. A thread that grew new replies updates its page instead of making a second one.
 - **Nothing is silent.** Every decision — yours and the automatic ones — is written down, so the wiki can always tell you where a page came from.
+- **You hear from it once a day, briefly.** One line in your chat saying what the run found — including on the days it found nothing, so a quiet week never looks the same as a broken connection.
 
 ## Real-life examples
 

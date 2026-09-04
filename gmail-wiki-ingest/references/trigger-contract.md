@@ -1,7 +1,9 @@
 # gmail-wiki-ingest — trigger contract
 
-What starts a run, and why it is an `openclaw cron` job rather than a
-server-side loop.
+What starts a run, and why it is an `openclaw cron` job **inside this
+container** rather than a server-side poller. (SKILL.md's reference list used to
+have this backwards. The poller was designed, then deleted; see "Why not a
+server-side trigger".)
 
 ## The trigger
 
@@ -12,8 +14,8 @@ by javis-server and reconciled on every default-skills pass
 ```
 openclaw cron add \
   --cron "0 7 * * *" \
-  --message "<the fetch → judge → submit steps; see below>" \
-  --name gmail-wiki-ingest-daily \
+  --message "<the fetch → judge → submit → report steps; see below>" \
+  --name gmail-wiki-ingest-daily-v2 \
   --agent main \
   --session isolated \
   --no-deliver \
@@ -28,9 +30,9 @@ register fails silently: no job, no daily run, no error anyone sees.
 
 | flag | why |
 |---|---|
-| `--name` | openclaw keys a job by name, so re-registration is a no-op rather than a duplicate. That is what makes the reconcile pass safe to run every sweep. |
+| `--name` | openclaw keys a job by name, so re-registration is a no-op rather than a duplicate. That is what makes the reconcile pass safe to run every sweep — and what makes the name **versioned**: see "Changing the prompt" below. |
 | `--agent main` | `cron add` warns and falls back to the default agent when omitted; pinning it keeps the turn in the session that has the skill loaded. |
-| `--no-deliver` | A cron job otherwise fallback-delivers the agent's final text to a chat. This skill's output is review cards the SERVER writes, so delivery would push the agent's own prose into the user's chat every morning — including on the empty-batch days when SKILL.md says to say nothing, which is exactly when a message is least wanted. |
+| `--no-deliver` | A cron job otherwise fallback-delivers the agent's final text to a chat — whatever the turn happened to end on, unformatted. This skill now delivers deliberately instead: `report` POSTs a rendered digest to `/api/agent/push`, which the flag does not touch. So the flag suppresses the agent's raw prose while the formatted message still lands, which is exactly the split this skill wants. Retained, for that reason rather than the original one. |
 | `--session isolated` | Keeps the turn out of the user's main chat session, matching every agentTurn job already in a prod `jobs.json`. |
 | `--tz` | Cron expressions otherwise run in the container's local zone, which is UTC — "7am daily" would fire at midnight for a Pacific user. Comes from `User.timezone`; omitted entirely when unset, so openclaw's own default applies. |
 
@@ -40,7 +42,7 @@ which skill it is — so `"Run the gmail-wiki-ingest skill now."` would lean
 entirely on the agent finding this SKILL.md unaided. The only hand-written
 ClawSkills cron in production (`calendar-extractor-self`) does not take that
 bet: its message spells out `fetch` → extract → `push`. This one spells out
-`fetch` → judge → `submit`, restates the empty-batch rule, and says
+`fetch` → judge → `submit` → `report`, restates the empty-batch rule, and says
 metadata-only. SKILL.md stays the authority on judgment; the message only has
 to get the agent into it. The exact text lives in
 `skill_install_service._SKILL_CRONS` and is pinned by tests.
@@ -49,6 +51,32 @@ The job is registered whether or not the install step ran this pass: the
 install sentinel says the *bundle* is present, which is a different claim from
 *the cron exists*. A container recreated from an image has the marker and no
 job, and the failure mode of a missing cron is silence.
+
+## Changing the prompt
+
+**A job's message is baked in at registration.** `ensure_skill_cron` skips the
+add when a job of the wanted name already exists, so editing the prompt in
+`_SKILL_CRONS` reaches new installs only — every already-provisioned container
+keeps firing the text it was created with, forever.
+
+That is why the name carries a version. The record holds
+`"name": "gmail-wiki-ingest-daily-v2"` plus
+`"legacy_names": ["gmail-wiki-ingest-daily"]`, and the reconcile pass removes
+any job matching a legacy name **before** adding v2. Removal is positional by
+job **id** — `openclaw cron remove <id>`, there is no `--name` flag and passing
+one errors — so the id comes out of the `cron list --json --all` listing the
+pass already fetches.
+
+The upshot for anyone editing the daily prompt: bump the version suffix and push
+the old name onto `legacy_names`, or the change silently reaches nobody who
+already has the skill. Existing containers converge on their next default-skills
+sweep (12h); a dormant user converges when their container next starts.
+
+The v2 prompt is the one that ends in `report`. A container still running the v1
+job never calls it, which is harmless — the digest is simply absent — and is
+also why the ClawSkills bundle ships before the server change rather than after:
+a prompt that calls `report` against a bundle that predates it would fail the
+turn's last step every morning.
 
 ## Why not a server-side trigger
 
@@ -91,8 +119,10 @@ time cannot use this pattern and needs a server-side sweep instead.
 
 `gmail_ingest_scopes.enabled`, the row iOS writes. The cron always fires;
 `fetch` returns an empty batch when the scope is off, and SKILL.md's
-empty-batch rule then applies — so a disabled user gets silence rather than a
-daily message about having nothing to do.
+empty-batch rule then applies — which, now that every run ends in a digest,
+means a disabled user gets a "nothing new" line rather than silence. That is
+the deliberate trade: proof of life is worth more than an absent message,
+because an absent message is exactly what a broken sync looks like.
 
 ## Verifying it
 

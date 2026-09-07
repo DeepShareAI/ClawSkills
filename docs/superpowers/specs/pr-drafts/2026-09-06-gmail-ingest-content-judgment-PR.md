@@ -389,7 +389,7 @@ them"** — an instruction not to use the step this branch is built on. The
   trimmed twice with the client's number silently winning. The design flags 12
   as a guess worth revisiting after one real run.
 - **E2E TC6 is inverted by this change.** The plan at
-  `javis.is/docs/superpowers/specs/2026-08-28-gmail-ingest-skill-migration-e2e-test-plan.md:171-184`
+  `javis.is/docs/superpowers/specs/2026-09-06-gmail-ingest-skill-migration-e2e-test-plan.md:171-184`
   asserts a body nonce is absent everywhere in the container, and it is in that
   plan's go/no-go set at `:263`. It needs **rewriting to the staged-batch
   property** — a nonce in a thread outside the batch must be absent; a nonce in

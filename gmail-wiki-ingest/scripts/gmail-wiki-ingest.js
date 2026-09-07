@@ -4,13 +4,18 @@
  *
  * Spec: javis.is/docs/superpowers/specs/2026-08-28-gmail-wiki-ingest-skill-migration-design.md
  *       javis.is/docs/superpowers/specs/2026-09-04-gmail-wiki-ingest-daily-report-design.md
+ *       javis.is/docs/superpowers/specs/2026-09-06-gmail-ingest-foundation-and-skill-split-design.md
  *
- * Three commands, mirroring calendar-extractor's split: the SCRIPT does the
+ * Four commands, mirroring calendar-extractor's split: the SCRIPT does the
  * I/O, the AGENT does the reasoning. Nothing in here judges an email — it
- * fetches a batch of headers, posts back the verdicts the agent produced, and
- * renders a digest out of what the server said about them.
+ * fetches a batch of headers, pulls the bodies the agent shortlisted, posts
+ * back the verdicts it produced, and renders a digest out of what the server
+ * said about them.
  *
  *   fetch   GET-shaped POST to /api/skill/candidates/fetch; prints the envelope
+ *   content reads an item_key array on stdin; POSTs
+ *           /api/skill/candidates/content and prints the bodies the server
+ *           returns for the keys IT offered this run
  *   submit  reads the verdict array on stdin; POSTs /api/skill/candidates/submit
  *   report  reads {headline, notes} on stdin; POSTs the run digest to
  *           /api/agent/push and clears the run state
@@ -155,6 +160,12 @@ function failed(envelope) {
  * calendar-extractor/scripts/data.js, so the file travels with the skill bundle
  * wherever the container mounts it and does not depend on where the cron turn
  * happened to be standing when it shelled out.
+ *
+ * **No mail body is ever written here.** `content` now brings bodies into the
+ * container, and this file is the one thing in the container built to outlive
+ * the turn — which is exactly what a body must not do. What `content`
+ * contributes is arithmetic: how many bodies were asked for, how many arrived,
+ * and which keys the server would not answer.
  */
 const STATE_PATH = path.join(__dirname, '../data/last-run.json');
 
@@ -225,10 +236,97 @@ async function doFetch(opts = {}, deps = {}) {
   return out;
 }
 
+// ---- content -------------------------------------------------------------
+/**
+ * How many threads one run may pull bodies for.
+ *
+ * It mirrors the server's own `CONTENT_BATCH_MAX`, so an over-long shortlist is
+ * trimmed here rather than answered as a wall of `unavailable` there. It is a
+ * budget, not a safety property: the safety property is that the server answers
+ * only keys its own `fetch` staged this run, and no number on this side can
+ * widen or weaken that.
+ */
+const CONTENT_BATCH_MAX = 12;
+
+/**
+ * Pull the bodies for the shortlist of threads the agent picked out of `fetch`.
+ *
+ * **NO `skill` FIELD**, and that is the endpoint rather than an oversight.
+ * `fetch` and `submit` both name the skill in their body because a gateway
+ * token identifies the user and not the skill. Here there is nothing to name:
+ * the server answers out of the batch this run's own `fetch` staged, so a key
+ * it never offered reads nothing no matter what the caller claims to be.
+ * Adding `skill: SKILL` "for symmetry with the other two" would be adding the
+ * one argument this call exists not to have.
+ *
+ * Bodies come back to the agent and go nowhere else. They are not written to
+ * the run state, not echoed into the digest, and not kept past the turn — see
+ * the run-state docblock above for why that file in particular must never hold
+ * one.
+ */
+async function doContent(itemKeys, deps = {}) {
+  if (!Array.isArray(itemKeys)) {
+    return { status: 'error', error: 'item_keys_must_be_an_array' };
+  }
+
+  // De-duplicated before the cap, so a key repeated by mistake cannot spend one
+  // of the twelve slots on a thread the request already contains.
+  const wanted = [...new Set(
+    itemKeys.map((k) => String(k == null ? '' : k).trim()).filter(Boolean),
+  )];
+  const keys = wanted.slice(0, CONTENT_BATCH_MAX);
+
+  if (keys.length < wanted.length) {
+    // Trimmed rather than refused. The first twelve are still a usable
+    // shortlist, and losing the run over an over-long one would cost more than
+    // the threads past the cap — those are re-offered next run anyway, because
+    // an unjudged item holds the watermark. It is still a selection bug, and
+    // the fix is `rubric.md`'s body-request policy, so it is said out loud on
+    // stderr and counted in the run state rather than swallowed.
+    console.error(
+      `content: ${wanted.length} keys requested, capped to ${CONTENT_BATCH_MAX}`,
+    );
+  }
+
+  const out = await postJson('/api/skill/candidates/content', { item_keys: keys }, deps);
+  if (!failed(out) && out.status === 'ok') {
+    const items = Array.isArray(out.items) ? out.items : [];
+    const unavailable = Array.isArray(out.unavailable) ? out.unavailable : [];
+    // MERGES, like `submit` and unlike `fetch`, and never writes
+    // `submitted_at`: that key is the flag renderFooter reads to choose its
+    // shape, so setting it here would dress a run that has submitted nothing in
+    // a submitted run's footer.
+    const merged = Object.assign({}, readState(deps) || {}, {
+      content_requested: keys.length,
+      content_over_cap: wanted.length - keys.length,
+      content_read: items.filter(
+        (it) => it && typeof it.text === 'string' && it.text.length > 0,
+      ).length,
+      // Keys, not text: an `item_key` is a thread id the state file already
+      // carries in `items[]`, and the reason is the server's word for why it
+      // read nothing.
+      content_unavailable: unavailable
+        .filter((u) => u && u.item_key)
+        .map((u) => ({
+          item_key: String(u.item_key),
+          reason: String(u.reason || 'unknown'),
+        })),
+    });
+    saveState(merged, deps);
+  }
+  return out;
+}
+
 // What `submit` contributes to the run state. `acted` is the join key half —
 // one row per verdict, LOW included — and the rest is the footer.
+// `gated` and `dropped` are both here and they are not the same number.
+// `dropped` is the server's older "judged, and kept nothing" count: it covers
+// the category gate AND the LOW band, so it overlaps `low` entirely. `gated` is
+// the category gate alone. The digest renders `gated`; `dropped` is kept
+// because it is what the submit log line carries and a run's state should hold
+// what the run was told.
 const SUBMIT_FIELDS = [
-  'high', 'middle', 'low', 'unvalidated', 'dropped',
+  'high', 'middle', 'low', 'unvalidated', 'dropped', 'gated',
   'rejected', 'uncovered', 'promoted',
 ];
 
@@ -380,26 +478,59 @@ function renderSection(band, rows, notes) {
  * say, and because a discard's *cause* has to stay knowable after the fact — a
  * thread that vanished at the machine-mail filter and one that lost the LOW
  * band must not read the same in the morning.
+ *
+ * `gated=` sits between the bands and the filter count because that is where
+ * it happens: `high`/`middle`/`low` are outcomes of banding, `gated` is the
+ * category gate that runs *before* banding and takes an item out with no band
+ * at all, and `filtered` is the server-side pass that ran before the agent saw
+ * anything. Reading outward from the judgment gives band → gate → filter →
+ * cursor. Without it a run where every thread was category-gated renders
+ * identically to one that judged nothing, which is exactly the run that
+ * happened in production and was undiagnosable from the digest.
+ *
+ * It is `gated` and NOT the server's `dropped`, which is the same counter this
+ * footer first shipped with and which does not mean what its name suggests:
+ * `dropped` counts the LOW band as well as the gate, so it overlaps `low`
+ * completely. Rendered beside the three bands it reports twenty outcomes for
+ * ten threads and sends its reader to hunt a labelling bug in a batch that was
+ * labelled correctly and merely scored low. `high + middle + low + gated` is
+ * the batch; `dropped` is not a term in that sum.
+ *
+ * `bodies` appears only on a run that called `content`, so a run that judged on
+ * metadata alone says nothing about bodies rather than saying `bodies 0/0`.
+ * Now that bodies enter the container before approval, the digest is the one
+ * place the user is told it happened.
  */
 function renderFooter(state) {
   const filtered = (state.filtered && typeof state.filtered === 'object') ? state.filtered : {};
   const counted = Object.entries(filtered).filter(([, n]) => Number(n) > 0);
   const total = counted.reduce((sum, [, n]) => sum + Number(n), 0);
 
+  const requested = Number(state.content_requested) || 0;
+  const bodies = requested > 0
+    ? `bodies ${Number(state.content_read) || 0}/${requested}`
+    : null;
+
   if (!state.submitted_at) {
     const detail = counted.length
       ? ` (${counted.map(([k, n]) => `${k} ${n}`).join(', ')})`
       : '';
-    return `${Number(state.n_items) || 0} fetched · filtered ${total}${detail}`;
+    return [
+      `${Number(state.n_items) || 0} fetched`,
+      bodies,
+      `filtered ${total}${detail}`,
+    ].filter(Boolean).join(' · ');
   }
 
   return [
     `high=${Number(state.high) || 0}`,
     `middle=${Number(state.middle) || 0}`,
     `low=${Number(state.low) || 0}`,
+    `gated=${Number(state.gated) || 0}`,
+    bodies,
     `filtered ${total}`,
     state.promoted ? 'cursor promoted' : 'cursor held',
-  ].join(' · ');
+  ].filter(Boolean).join(' · ');
 }
 
 /**
@@ -519,6 +650,23 @@ async function runCommand(argv, stdin, deps = {}) {
     return { out: await doFetch({ limit: flag('limit', '25') }, deps), exitCode: 0 };
   }
 
+  if (cmd === 'content') {
+    let itemKeys;
+    try {
+      itemKeys = raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      // Same reasoning as submit's below, one step earlier: degrading a JSON
+      // error into an empty request would read as "the agent chose to judge on
+      // metadata alone", which is a legitimate choice the rubric allows and is
+      // therefore indistinguishable from it in the digest afterwards.
+      return {
+        out: { status: 'error', error: 'unparseable_item_keys', detail: e.message },
+        exitCode: 1,
+      };
+    }
+    return { out: await doContent(itemKeys, deps), exitCode: 0 };
+  }
+
   if (cmd === 'submit') {
     let verdicts;
     try {
@@ -555,14 +703,20 @@ async function runCommand(argv, stdin, deps = {}) {
 }
 
 const USAGE = 'usage: gmail-wiki-ingest.js fetch [--limit N]'
+  + ' | content (item_keys JSON array on stdin)'
   + ' | submit  (verdicts JSON on stdin)'
   + ' | report  ({"headline":"…","notes":{…}} on stdin)';
 
+// The commands with a stdin contract, and the only ones that wait for one:
+// reading stdin unconditionally would hang `fetch` on a terminal that never
+// closes it. A command missing from this set fails silently rather than loudly
+// — it receives '', parses to [], and posts a request for nothing — so it is a
+// named set rather than an inline test.
+const STDIN_COMMANDS = new Set(['content', 'submit', 'report']);
+
 async function main() {
   const { cmd } = parseArgv(process.argv);
-  // Only the two commands with a stdin contract wait for one. Reading it
-  // unconditionally would hang `fetch` on a terminal that never closes it.
-  const stdin = (cmd === 'submit' || cmd === 'report') ? await readStdin() : '';
+  const stdin = STDIN_COMMANDS.has(cmd) ? await readStdin() : '';
 
   const { out, exitCode } = await runCommand(process.argv, stdin);
   if (out === null) console.error(USAGE);
@@ -580,6 +734,7 @@ if (require.main === module) {
 module.exports = {
   runCommand,
   doFetch,
+  doContent,
   doSubmit,
   doReport,
   postJson,
@@ -592,6 +747,7 @@ module.exports = {
   renderReport,
   renderFooter,
   REPORT_EXIT_CODES,
+  CONTENT_BATCH_MAX,
   STATE_PATH,
   STALE_AFTER_MS,
   MAX_BULLETS,

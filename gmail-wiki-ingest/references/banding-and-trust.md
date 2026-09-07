@@ -1,8 +1,8 @@
 # What the server does with a verdict
 
-Background for anyone editing the rubric in `SKILL.md`. **None of this is
-reachable from the skill** — it is here so that a rubric change is made with the
-consequences in view, not so the agent can aim at a band.
+Background for anyone editing `rubric.md`. **None of this is reachable from the
+skill** — it is here so that a rubric change is made with the consequences in
+view, not so the agent can aim at a band.
 
 Source: `javis-server/app/services/skill_preferences.py` (the skill-agnostic
 rails) and the gmail bindings in `app/services/gmail_wiki_ingest.py`. Specs:
@@ -35,8 +35,9 @@ Gmail's defaults, all env-overridable for cold-launch tuning: `low_cut = 0.6`,
 
 **The cuts are a low-tail trim, not a precision knob.** Raising `high_cut`
 does not fix precision — the category gate and the machine-mail filter are what
-do that. If unwanted mail is reaching the wiki, the fix is almost always the
-rubric in `SKILL.md`, which is the entire reason the judging moved out here.
+do that. If unwanted mail is reaching the wiki, the fix is almost always
+`rubric.md`, which is the entire reason the judging moved out here and the
+reason it is its own file.
 
 ## Trust
 
@@ -90,4 +91,7 @@ Banding never leaves Python, so a confused or prompt-injected agent cannot
 auto-confirm anything: the worst it can do is score honestly-labelled mail
 wrongly, which lands a MIDDLE card in front of the user — exactly the state the
 system is designed around. That containment is what makes it safe to put the
-rubric in an editable, ClawHub-shipped prompt in the first place.
+rubric in an editable, ClawHub-shipped prompt in the first place — and, since
+the `content` command, what makes it safe for the agent to read message bodies
+before anyone has approved them. The injection surface grew; the blast radius
+did not. Every gate in this file runs after the agent is finished.

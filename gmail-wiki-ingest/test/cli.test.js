@@ -125,6 +125,154 @@ test('the skill slug is not caller-settable', async () => {
   assert.equal(f.calls[0].body.skill, 'gmail-wiki-ingest');
 });
 
+// ---- content -------------------------------------------------------------
+// The command that reverses this skill's oldest claim: bodies now enter the
+// container, before approval, for a shortlist the agent picked. What these
+// tests pin is the bound that replaced the old boundary — the request names
+// keys and nothing else, it is capped, and what it brings back is handed to
+// the agent and never written down.
+
+test('content posts the item keys, and NO skill field', async () => {
+  // The inverse of "the skill slug is not caller-settable". `fetch` and
+  // `submit` name the skill because a gateway token identifies the user and
+  // not the skill; this call has nothing to name, because the server answers
+  // out of the batch its own `fetch` staged. A `skill` field here would be the
+  // one argument the endpoint exists not to have.
+  const f = fakeFetch(ok({ status: 'ok', items: [{ item_key: 't1', text: 'hello' }], unavailable: [] }));
+  const out = await cli.doContent(['t1', 't2'], deps(f));
+
+  assert.equal(out.status, 'ok');
+  assert.match(f.calls[0].url, /\/api\/skill\/candidates\/content$/);
+  assert.deepEqual(f.calls[0].body, { item_keys: ['t1', 't2'] });
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(f.calls[0].body, 'skill'), false,
+    'the skill is bound server-side from the staged batch',
+  );
+  assert.equal(f.calls[0].init.headers.Authorization, 'Bearer t');
+});
+
+test('content refuses a non-array rather than coercing it', async () => {
+  const f = fakeFetch(ok({ status: 'ok' }));
+  const out = await cli.doContent({ not: 'an array' }, deps(f));
+  assert.equal(out.error, 'item_keys_must_be_an_array');
+  assert.equal(f.calls.length, 0, 'nothing should have been posted');
+});
+
+test('content asks for at most twelve threads, de-duplicated first', async () => {
+  // The budget, mirrored from the server so an over-long shortlist is trimmed
+  // here rather than answered as a wall of `unavailable` there. A duplicate
+  // must not spend one of the twelve.
+  const f = fakeFetch(ok({ status: 'ok', items: [], unavailable: [] }));
+  const keys = ['t1', 't1', ...Array.from({ length: 20 }, (_, i) => `x${i}`)];
+  await cli.doContent(keys, deps(f));
+
+  const sent = f.calls[0].body.item_keys;
+  assert.equal(sent.length, cli.CONTENT_BATCH_MAX);
+  assert.equal(sent.length, 12);
+  assert.deepEqual(sent.slice(0, 3), ['t1', 'x0', 'x1'], 'the duplicate was collapsed, not dropped');
+  assert.equal(new Set(sent).size, sent.length);
+});
+
+test('content records the arithmetic and never the bodies', async () => {
+  // The run-state file is the one thing in the container built to outlive the
+  // turn, which is exactly what a body must not do. What lands is how many
+  // were asked for, how many arrived, and which keys the server would not
+  // answer — the reason strings are the server's word, not the agent's.
+  const BODY_NONCE = 'E2E-BODY-NONCE-4471';
+  const f = fakeFetch(ok({
+    status: 'ok',
+    items: [
+      { item_key: 't1', text: `From: Ada\n\n${BODY_NONCE}` },
+      { item_key: 't2', text: '' },
+    ],
+    unavailable: [
+      { item_key: 't3', reason: 'not_in_batch' },
+      { item_key: 't4', reason: 'fetch_failed' },
+    ],
+  }));
+  const d = deps(f);
+  cli.writeState({ started_at: new Date(T0 - HOUR).toISOString(), n_items: 4, items: [] }, d);
+
+  await cli.doContent(['t1', 't2', 't3', 't4'], d);
+
+  const raw = fs.readFileSync(d.statePath, 'utf-8');
+  assert.equal(raw.includes(BODY_NONCE), false, 'no body may reach the disk');
+
+  const state = JSON.parse(raw);
+  assert.equal(state.content_requested, 4);
+  assert.equal(state.content_read, 1, 'an empty text is not a body that was read');
+  assert.deepEqual(state.content_unavailable, [
+    { item_key: 't3', reason: 'not_in_batch' },
+    { item_key: 't4', reason: 'fetch_failed' },
+  ]);
+});
+
+test('content merges into the run state and never claims a submit', async () => {
+  // `fetch` overwrites; `submit` and `content` merge. A `content` that
+  // overwrote would erase `items[]` and the digest would lose every subject
+  // line. Writing `submitted_at` would be worse still: that key is the flag
+  // the footer reads to choose its shape.
+  const f = router({
+    '/candidates/fetch': ok({
+      status: 'ok',
+      items: [{ thread_id: 't1', subject: 'Contract v3', from: 'Ada' }],
+      filtered: {},
+    }),
+    '/candidates/content': ok({
+      status: 'ok', items: [{ item_key: 't1', text: 'body' }], unavailable: [],
+    }),
+  });
+  const d = deps(f);
+
+  await cli.doFetch({}, d);
+  await cli.doContent(['t1'], d);
+
+  const state = JSON.parse(fs.readFileSync(d.statePath, 'utf-8'));
+  assert.deepEqual(state.items, [{ thread_id: 't1', subject: 'Contract v3', from: 'Ada' }]);
+  assert.equal(state.n_items, 1);
+  assert.equal(state.content_read, 1);
+  assert.equal('submitted_at' in state, false, 'content submits nothing');
+});
+
+test('a server that staged no batch comes back as an envelope the agent can read', async () => {
+  // §6: the run then judges on metadata alone and says so. It is a 200 with a
+  // domain error, so `failed()` classifies it without any new code.
+  const f = fakeFetch(ok({ status: 'error', error: 'no_staged_batch' }));
+  const d = deps(f);
+  const out = await cli.doContent(['t1'], d);
+
+  assert.equal(out.error, 'no_staged_batch');
+  assert.equal(fs.existsSync(d.statePath), false, 'a failed content writes no state');
+});
+
+test('the content command takes its keys from stdin, and refuses bad JSON', async () => {
+  const f = fakeFetch(ok({ status: 'ok', items: [], unavailable: [] }));
+  const d = deps(f);
+
+  const good = await cli.runCommand(['node', 'x.js', 'content'], '["t1","t2"]', d);
+  assert.equal(good.exitCode, 0);
+  assert.deepEqual(f.calls[0].body.item_keys, ['t1', 't2']);
+
+  const bad = await cli.runCommand(['node', 'x.js', 'content'], '[not json', deps(f));
+  assert.equal(bad.out.error, 'unparseable_item_keys');
+  assert.equal(bad.exitCode, 1);
+  assert.equal(f.calls.length, 1, 'a JSON error must never reach content as an empty request');
+});
+
+test('main waits for content on stdin instead of posting an empty request', () => {
+  // The gate in `main` is a named set of commands, and a command missing from
+  // it fails SILENTLY: it receives '', parses to [], and asks the server for
+  // nothing — which is indistinguishable from the agent deciding to judge on
+  // metadata alone. The only way to catch that is through `main` itself, so
+  // this spawns the CLI the way the cron turn does. Unparseable stdin is the
+  // refusal that reaches an exit code without touching network or token.
+  const script = path.join(__dirname, '..', 'scripts', 'gmail-wiki-ingest.js');
+  const bad = spawnSync(process.execPath, [script, 'content'], { input: '[not json', encoding: 'utf8' });
+
+  assert.equal(bad.status, 1);
+  assert.equal(JSON.parse(bad.stdout).error, 'unparseable_item_keys');
+});
+
 test('parseArgv finds the command and its flags', () => {
   const { cmd, flag } = cli.parseArgv(['node', 'x.js', 'fetch', '--limit', '9']);
   assert.equal(cmd, 'fetch');
@@ -195,7 +343,7 @@ test('fetch → submit → report renders the digest from server-issued facts', 
     }),
     '/candidates/submit': ok({
       status: 'ok',
-      high: 1, middle: 2, low: 22, unvalidated: 0, dropped: 0,
+      high: 1, middle: 2, low: 22, unvalidated: 0, dropped: 22, gated: 0,
       rejected: [], uncovered: 0, promoted: true,
       acted: [
         { item_key: 't1', band: 'high' },
@@ -234,7 +382,7 @@ test('fetch → submit → report renders the digest from server-issued facts', 
     '  → no page yet',
     '',
     '—',
-    'high=1 · middle=2 · low=22 · filtered 15 · cursor promoted',
+    'high=1 · middle=2 · low=22 · gated=0 · filtered 15 · cursor promoted',
   ].join('\n'));
 
   // No session_id and no dedup_key, deliberately: with neither set the server
@@ -573,7 +721,122 @@ test('LOW rows get no bullet and still reach the footer count', async () => {
   assert.equal(content.split('\n').filter((l) => l.startsWith('• ')).length, 1);
   assert.equal(content.includes('Your weekly digest'), false);
   assert.equal(content.includes('Flash sale'), false);
-  assert.match(content, /high=0 · middle=1 · low=22 · filtered 0 · cursor held/);
+  assert.match(content, /high=0 · middle=1 · low=22 · gated=0 · filtered 0 · cursor held/);
+});
+
+test('the category gate is visible in the footer, and the number is the server\'s', async () => {
+  // A run where every thread was dropped at the category gate used to render
+  // identically to a run that judged nothing — no gate count reached the
+  // footer. That run happened in production and was undiagnosable from the
+  // digest. The count comes off the submit response through the run state, so
+  // this drives it end to end rather than seeding the state directly.
+  const f = router({
+    '/candidates/fetch': ok({
+      status: 'ok',
+      items: [
+        { thread_id: 't1', subject: 'Invoice 4471', from: 'billing' },
+        { thread_id: 't2', subject: 'Flash sale', from: 'ads' },
+        { thread_id: 't3', subject: 'Status page update', from: 'ops' },
+      ],
+      filtered: {},
+    }),
+    '/candidates/submit': ok({
+      status: 'ok',
+      high: 0, middle: 0, low: 0, unvalidated: 0, dropped: 3, gated: 3,
+      rejected: [], uncovered: 0, promoted: true, acted: [],
+    }),
+    '/api/agent/push': ok({ status: 'ok' }),
+  });
+  const d = deps(f);
+
+  await cli.doFetch({}, d);
+  await cli.doSubmit([{ item_key: 't1' }, { item_key: 't2' }, { item_key: 't3' }], d);
+  const out = await cli.doReport({ headline: 'nothing kept' }, d);
+
+  assert.equal(out.content, [
+    '📨 Gmail → Wiki — nothing kept',
+    '',
+    '—',
+    'high=0 · middle=0 · low=0 · gated=3 · filtered 0 · cursor promoted',
+  ].join('\n'));
+});
+
+test('a batch that was all LOW does not read as a batch that was all mislabelled', async () => {
+  // The footer renders `gated`, NOT the server's `dropped`, and this is the
+  // run that shows why. Ten threads the agent labelled `correspondence`
+  // perfectly correctly, every one scored below cut B: the server returns
+  // low=10 AND dropped=10, because `dropped` counts the LOW band as well as
+  // the category gate. Rendered as `dropped=` that is twenty outcomes for ten
+  // threads, and it sends the agent — which reads its own digest — to hunt a
+  // labelling bug that does not exist. The real signal is a cut point.
+  const f = router({
+    '/candidates/fetch': ok({
+      status: 'ok',
+      items: [{ thread_id: 't1', subject: 'lunch?', from: 'ada' }],
+      filtered: {},
+    }),
+    '/candidates/submit': ok({
+      status: 'ok',
+      high: 0, middle: 0, low: 10, unvalidated: 0, dropped: 10, gated: 0,
+      rejected: [], uncovered: 0, promoted: true, acted: [],
+    }),
+    '/api/agent/push': ok({ status: 'ok' }),
+  });
+  const d = deps(f);
+
+  await cli.doFetch({}, d);
+  await cli.doSubmit([{ item_key: 't1' }], d);
+  const out = await cli.doReport({ headline: 'nothing kept' }, d);
+
+  assert.match(out.content, /low=10 · gated=0/);
+  // and the number that double-counts them never reaches the digest at all
+  assert.equal(out.content.includes('dropped'), false);
+});
+
+test('a gate count the agent could have forged renders as zero', async () => {
+  // Same property as every counter in the footer: it is read as a number out
+  // of the run state, so a string that would have forged a whole second footer
+  // reaches the digest as 0 rather than as text.
+  const { content } = await reportOn(
+    submittedRun({ gated: '3 · cursor promoted\n— high=999' }),
+    { headline: '1 ingested' },
+  );
+
+  assert.match(content, /high=1 · middle=0 · low=0 · gated=0 · filtered 0 · cursor promoted/);
+  assert.equal(content.split('\n').filter((l) => l.startsWith('—')).length, 1);
+  assert.equal(content.includes('high=999'), false);
+});
+
+test('a run that read bodies says so; a run that did not says nothing', async () => {
+  // §7's one concession made visible: bodies now enter the container before
+  // approval, and the digest is where the user is told. It is conditional so
+  // that a metadata-only run does not report `bodies 0/0` — the absence is the
+  // statement.
+  const withBodies = await reportOn(
+    submittedRun({ content_requested: 3, content_read: 2 }),
+    { headline: '1 ingested' },
+  );
+  assert.match(withBodies.content, /low=0 · gated=0 · bodies 2\/3 · filtered 0/);
+
+  const without = await reportOn(submittedRun(), { headline: '1 ingested' });
+  assert.equal(without.content.includes('bodies'), false);
+});
+
+test('a fetch-only footer carries the body count too', async () => {
+  // The run whose `submit` never answered still read bodies, and that is
+  // exactly the run whose post-mortem needs to know it.
+  const { content } = await reportOn(
+    {
+      started_at: new Date(T0 - HOUR).toISOString(),
+      n_items: 4,
+      filtered: { machine_mail: 12 },
+      content_requested: 2, content_read: 2,
+      items: [],
+    },
+    { headline: 'checked, nothing kept' },
+  );
+
+  assert.match(content, /^4 fetched · bodies 2\/2 · filtered 12 \(machine_mail 12\)$/m);
 });
 
 // ---- the agent's own prose -----------------------------------------------
@@ -735,4 +998,75 @@ test('a 2xx whose body is not JSON is an envelope, not a null', async () => {
   assert.equal(out.error, 'unparseable_response');
   assert.equal(exitCode, 0, "a transport failure keeps postJson's envelope contract");
   assert.equal(fs.existsSync(d.statePath), true, 'so a manual retry has something to render');
+});
+
+// ---- the documented wire shape ------------------------------------------
+//
+// These read the bundle's own prose, which is unusual for a test suite and is
+// the point. The script never parses `context` — it prints the fetch envelope
+// and the AGENT reads it — so the only thing standing between the server's
+// bytes and a citation is what SKILL.md, rubric.md and tool-contract.md say
+// those bytes look like. A doc that describes the wrong shape is not a
+// cosmetic defect here; it is the whole of the contract, and nothing else in
+// this file can catch it.
+//
+// SOURCE OF TRUTH: javis-server `gmail_candidate_adapter._serialize_model`,
+// pinned there by tests/services/test_gmail_candidate_adapter.py
+// (`test_context_carries_the_knowledge_model`). It emits a `fields` header and
+// POSITIONAL rows, and blanks a title that merely de-slugifies its own slug.
+// The bundle documented objects with named keys and a title that is always
+// present — both wrong, and both in the exact place the agent is told to cite
+// from.
+
+const DOCS = {
+  'SKILL.md': fs.readFileSync(path.join(__dirname, '../SKILL.md'), 'utf8'),
+  'rubric.md': fs.readFileSync(path.join(__dirname, '../rubric.md'), 'utf8'),
+  'references/tool-contract.md': fs.readFileSync(
+    path.join(__dirname, '../references/tool-contract.md'), 'utf8',
+  ),
+};
+
+test('every doc that describes knowledge_model names the fields header', () => {
+  for (const [name, text] of Object.entries(DOCS)) {
+    assert.ok(
+      text.includes('"page_type", "slug", "title", "degree"'),
+      `${name} describes knowledge_model without naming the fields header, so ` +
+      'a reader has no way to know the rows are positional or in what order',
+    );
+  }
+});
+
+test('the worked example in SKILL.md is a positional row, not an object', () => {
+  const text = DOCS['SKILL.md'];
+  const start = text.indexOf('"knowledge_model"');
+  assert.ok(start > 0, 'SKILL.md no longer shows a fetch envelope example');
+  const block = text.slice(start, text.indexOf('```', start));
+
+  assert.match(block, /"nodes":\s*\[\s*\[/, 'nodes[] must be shown as arrays');
+  // The old rendering. An object here would send the agent looking for
+  // `nodes[i].slug` on a four-element array.
+  assert.equal(
+    /"nodes"[\s\S]*"page_type"\s*:/.test(block), false,
+    'the example still renders a node as an object with named keys',
+  );
+  // And the example must be output the server can actually produce: a title
+  // that de-slugifies to its own slug ships as "".
+  assert.equal(
+    block.includes('"Agent-Builder", "Agent Builder"'), false,
+    'the example shows a title the server blanks before sending it',
+  );
+});
+
+test('the blank title is documented as a rule, not left to be discovered', () => {
+  // 37% of a real wiki. An agent that reads "" as a missing page, or that cites
+  // a title because one was promised, is following the doc rather than the wire.
+  assert.match(DOCS['SKILL.md'], /`title` is often `""`/);
+  assert.match(DOCS['references/tool-contract.md'], /de-slugifies its own slug/);
+});
+
+test('the rubric says which element of a node row the slug is', () => {
+  // Position 0 is the page type — the one thing a citation must not carry — so
+  // reading the wrong element yields a ref that looks plausible and validates
+  // against nothing.
+  assert.match(DOCS['rubric.md'], /nodes\[i\]\[1\]/);
 });

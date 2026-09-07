@@ -17,9 +17,11 @@ new, decides what's worth keeping, and hands you a short list to approve.
 
 ## What it does
 
-Every day, Gmail Ingest reads the *outside* of your recent mail — who it's from,
-what the subject says, how long the thread is. It never opens a message you
-haven't approved.
+Every day, Gmail Ingest starts with the *outside* of your recent mail — who it's
+from, what the subject says, how long the thread is. For most of it that's
+enough: a receipt is a receipt from the envelope. For the handful it can't call
+either way, it opens the message and reads it — at most a dozen a day, and only
+from the mail it was already looking at.
 
 From that, it picks out the real correspondence: actual back-and-forth between
 people. Receipts, invoices, newsletters, conference invites and platform notices
@@ -57,7 +59,7 @@ Open your HiJavis chat and say any of these:
 
 - **It learns from your taps.** Confirm and Discard aren't just this-one-time answers — they teach it. Discard the same weekly notice a few times and it stops asking.
 - **Senders you keep saying yes to stop needing a tap.** After you've confirmed someone several times, their mail goes straight into your wiki, with an undo on the card if you disagree. One discard takes that back.
-- **It reads almost nothing.** Until you approve a thread, it has only seen the envelope — the sender, the subject, the date. The message itself stays on the server, and never reaches the part that does the judging.
+- **It reads as little as it can get away with.** Most of your mail it judges from the envelope alone. It opens at most a dozen messages a day, only ones already in the day's batch, and only to decide whether they belong in your wiki — nothing it opens that way is saved anywhere. Nothing is written into your wiki without your approval, or without a sender you've already approved several times.
 - **It never asks twice.** A thread you've answered doesn't come back. A thread that grew new replies updates its page instead of making a second one.
 - **Nothing is silent.** Every decision — yours and the automatic ones — is written down, so the wiki can always tell you where a page came from.
 - **You hear from it once a day, briefly.** One line in your chat saying what the run found — including on the days it found nothing, so a quiet week never looks the same as a broken connection.
@@ -71,7 +73,7 @@ Open your HiJavis chat and say any of these:
 
 ## Good to know
 
-- **Confirm is the gate.** Nothing is read in full, and nothing is written to your wiki, until you say so — or until a sender has earned your standing approval by being confirmed several times, which one discard revokes.
+- **Confirm is the gate.** Nothing is written to your wiki until you say so — or until a sender has earned your standing approval by being confirmed several times, which one discard revokes. A message the skill opens while deciding is read once, in the moment, and kept nowhere.
 - **Runs when you're around.** The daily check happens the next time you use the app after it comes due, not on a fixed clock. Nothing is missed — a later run just covers a longer stretch of mail.
 - **The switch is in the app.** Turning Gmail ingest off in HiJavis stops it. Nothing else needs changing.
 - **Read-only.** The skill can read mail; it cannot send, delete, label, or reply to anything.

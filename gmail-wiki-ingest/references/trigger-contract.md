@@ -15,7 +15,7 @@ by javis-server and reconciled on every default-skills pass
 openclaw cron add \
   --cron "0 7 * * *" \
   --message "<the fetch → judge → submit → report steps; see below>" \
-  --name gmail-wiki-ingest-daily-v2 \
+  --name gmail-wiki-ingest-daily-v3 \
   --agent main \
   --session isolated \
   --no-deliver \
@@ -41,11 +41,26 @@ isolated session started by openclaw's own timer — no dispatcher has told it
 which skill it is — so `"Run the gmail-wiki-ingest skill now."` would lean
 entirely on the agent finding this SKILL.md unaided. The only hand-written
 ClawSkills cron in production (`calendar-extractor-self`) does not take that
-bet: its message spells out `fetch` → extract → `push`. This one spells out
-`fetch` → judge → `submit` → `report`, restates the empty-batch rule, and says
-metadata-only. SKILL.md stays the authority on judgment; the message only has
-to get the agent into it. The exact text lives in
-`skill_install_service._SKILL_CRONS` and is pinned by tests.
+bet: its message spells out `fetch` → extract → `push`. This one spells out the
+run's steps, restates the empty-batch rule, and points at SKILL.md, which stays
+the authority on the flow and `rubric.md` on the judgment. The exact text lives
+in `skill_install_service._SKILL_CRONS` and is pinned by tests.
+
+**The `-v2` message was out of date in the worst direction, and `-v3` is the
+correction.** v2 described a three-step run and told the agent the items are
+"thread METADATA only … there are no bodies and you must not go looking for
+them" — with `content` in the bundle, an instruction not to use the step the
+judgment pass is built on. Fixing it could not be a bundle publish: a job's
+message is baked in at registration, so the bundle alone reaches nobody. The
+server record now carries `"name": "gmail-wiki-ingest-daily-v3"`,
+`"legacy_names": ["gmail-wiki-ingest-daily-v2", "gmail-wiki-ingest-daily"]`,
+`"min_bundle_version": "0.5.0"` and a five-step prompt with `content` between
+the fetch and the judgment.
+
+**Publish order still matters.** `min_bundle_version` gates the registration on
+the bundle actually on disk, so a container behind 0.5.0 keeps its v2 job until
+its own update sweep catches up — which is the safe direction, and the reason
+the bundle must reach ClawHub before anyone expects the new job to appear.
 
 The job is registered whether or not the install step ran this pass: the
 install sentinel says the *bundle* is present, which is a different claim from
@@ -60,9 +75,12 @@ add when a job of the wanted name already exists, so editing the prompt in
 keeps firing the text it was created with, forever.
 
 That is why the name carries a version. The record holds
-`"name": "gmail-wiki-ingest-daily-v2"` plus
-`"legacy_names": ["gmail-wiki-ingest-daily"]`, and the reconcile pass removes
-any job matching a legacy name **before** adding v2. Removal is positional by
+`"name": "gmail-wiki-ingest-daily-v3"` plus
+`"legacy_names": ["gmail-wiki-ingest-daily-v2", "gmail-wiki-ingest-daily"]` —
+every superseded name stays listed, not just the one immediately before it, so
+a container dormant since the first rollout still loses its original job — and
+the reconcile pass removes any job matching a legacy name **after** adding the
+current one, so a failed add cannot leave a user with no job at all. Removal is positional by
 job **id** — `openclaw cron remove <id>`, there is no `--name` flag and passing
 one errors — so the id comes out of the `cron list --json --all` listing the
 pass already fetches.
@@ -76,7 +94,9 @@ The v2 prompt is the one that ends in `report`. A container still running the v1
 job never calls it, which is harmless — the digest is simply absent — and is
 also why the ClawSkills bundle ships before the server change rather than after:
 a prompt that calls `report` against a bundle that predates it would fail the
-turn's last step every morning.
+turn's last step every morning. The same ordering applies to the `content`
+step: publish the bundle first, then bump the cron to `-v3`, so a prompt that
+names `content` never meets a bundle that has no such command.
 
 ## Why not a server-side trigger
 

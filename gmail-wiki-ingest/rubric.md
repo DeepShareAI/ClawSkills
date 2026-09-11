@@ -1,11 +1,12 @@
 # The judgment rubric
 
 **This file is the judgment.** Everything about *how relevance is decided* —
-the category enum, what a score means, what may be cited, and which threads are
-worth reading in full — lives here and nowhere else. Changing any of it is an
-edit to this file plus `clawhub publish`. **No server deploy is required to
-change how mail is judged**, and that is the entire reason this file exists
-apart from `SKILL.md`.
+the category enum, what a score means, what may be cited, which date a thread
+belongs on, and which threads are worth reading in full — lives here and
+nowhere else. Changing any of it is an edit to this file plus
+`clawhub publish`. **No server deploy is required to change how mail is
+judged**, and that is the entire reason this file exists apart from
+`SKILL.md`.
 
 The split is worth stating in one line, because it decides where a fix goes:
 
@@ -130,9 +131,41 @@ more than about 200 characters.
 If you read the body, say something only the body could tell you. That is the
 cheapest possible check on whether reading it was worth a slot.
 
+## 5. `occurred_at` — which date the thread belongs on
+
+Optional, ISO-8601, and it **must carry a zone** (`2026-09-04T17:22:00Z`). It is
+the instant the thread is *about*, and it is the only thing that decides which
+day of the user's timeline the card files itself under. A card with no date of
+its own sits on today, and then on tomorrow's today, which is how a September 4
+email ends up reading as something that happened this morning.
+
+**Default to the newest message's `date`, which `fetch` gives you.** For nearly
+every thread that is the right answer, because the mail happened when it was
+sent. Sending that value explicitly is not wasted work — it is the same date the
+server would fall back to, and it says you considered the question.
+
+**Choose an earlier one when the thread is plainly about something that happened
+before it.** A receipt forwarded weeks later belongs on the purchase date, not
+the forward date; a contract scanned and mailed in September belongs on the day
+it was signed. The earlier date has to be *in* what you read, though. This is a
+reading task, not an inference from the topic — a date you guessed at files the
+card on a day nothing happened, and the user has no way to tell it apart from
+one you found.
+
+**Never choose a future date.** The server replaces it with the thread's own
+date, so a future value buys nothing and throws away the choice you were making.
+An email records correspondence that already happened; the days ahead of today
+belong to the calendar, and this skill does not write into them.
+
+**Omitting it is a legitimate answer**, in the same way an empty `refs` list is.
+A thread you cannot date falls back to exactly the instant the server already
+holds. Leave it out rather than send a date you do not believe — the field can
+only ever move a card onto a truer day, and a wrong one moves it somewhere the
+user will never scroll to.
+
 ---
 
-## 5. The body-request policy — which threads are worth reading
+## 6. The body-request policy — which threads are worth reading
 
 `content` returns the full text of threads **the server already offered this
 run**, up to **12 per run**. Asking for more is trimmed to the first twelve; the
@@ -185,7 +218,7 @@ disposes" in `SKILL.md` — but the paragraph is still how you should read.
 
 ---
 
-## 6. Coverage — the rule that is not negotiable
+## 7. Coverage — the rule that is not negotiable
 
 **One verdict per item, covering every item the fetch offered, including the
 junk and including every thread you never read a body for.** An item you leave

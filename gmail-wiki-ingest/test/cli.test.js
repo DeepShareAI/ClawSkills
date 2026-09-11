@@ -100,6 +100,51 @@ test('submit posts the verdict array verbatim', async () => {
   assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
 });
 
+test('submit carries occurred_at through to the body untouched', async () => {
+  // Which day a card files itself under is the skill's judgment (`rubric.md`
+  // §5) and the server's to police, and the script is the wire between them
+  // and nothing else. It must not whitelist the verdict's keys: the whole
+  // reason the judgment lives in this bundle is that it can grow a field
+  // without a server deploy, and a script that reshaped verdicts would put a
+  // second deploy — of the bundle's code, not its prose — back in that path.
+  const f = fakeFetch(ok({ status: 'ok', high: 0, middle: 1, low: 0 }));
+  const verdicts = [{
+    item_key: 't1',
+    score: 0.7,
+    category: 'correspondence',
+    refs: [],
+    reason: 'a receipt forwarded weeks after the purchase it records',
+    occurred_at: '2026-09-04T17:22:00Z',
+  }];
+  const out = await cli.doSubmit(verdicts, deps(f));
+  assert.equal(out.middle, 1);
+  assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
+  // Spelled out separately from the deepEqual above, because that assertion
+  // would still pass if a future change dropped the key on both sides.
+  assert.equal(f.calls[0].body.verdicts[0].occurred_at, '2026-09-04T17:22:00Z');
+});
+
+test('a verdict with no occurred_at submits unchanged', async () => {
+  // The field is optional the whole way down, and the fallback belongs to the
+  // server — it holds the thread's real newest-message instant and the
+  // container holds only its own clock. So an undated verdict must arrive
+  // undated: a date stamped in here would be the run's time, not the mail's,
+  // and it would file the card on the day it was judged while looking exactly
+  // like a date the agent had chosen.
+  const f = fakeFetch(ok({ status: 'ok', high: 0, middle: 1, low: 0 }));
+  const verdicts = [{
+    item_key: 't1',
+    score: 0.7,
+    category: 'correspondence',
+    refs: [],
+    reason: 'one sentence',
+  }];
+  const out = await cli.doSubmit(verdicts, deps(f));
+  assert.equal(out.middle, 1);
+  assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
+  assert.equal('occurred_at' in f.calls[0].body.verdicts[0], false);
+});
+
 test('submit refuses a non-array rather than coercing it', async () => {
   // An empty submit is MEANINGFUL: it says the batch was judged and nothing was
   // worth keeping, and it promotes the cursor past every item in it. Coercing a

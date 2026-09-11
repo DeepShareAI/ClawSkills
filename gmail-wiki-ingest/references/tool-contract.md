@@ -196,7 +196,8 @@ run judges on metadata, and no state is written.
     "category": "correspondence" | "transactional" | "marketing" | "announcement",
     "score": 0.0,
     "refs": [ { "page_type": "concept", "slug": "Agent-Builder" } ],
-    "reason": "one sentence" }
+    "reason": "one sentence",
+    "occurred_at": "2026-09-04T17:22:00Z" }
 ] }
 ```
 
@@ -204,6 +205,35 @@ run judges on metadata, and no state is written.
 `related_to`; the column keeps its name because renaming it would buy nothing.
 For a skill with nothing to cite, `refs` is `[]` and validation is a
 pass-through.
+
+**`occurred_at` is optional, and it is the instant the item is *about* rather
+than the instant it was judged.** The server writes it to the candidate row's
+time anchor, so the card files itself under that day on the user's timeline
+instead of under today. It must be ISO-8601 **with a zone** — the trailing `Z`
+in the example, or any explicit offset. A zoneless string is not read in the
+container's local time, it is refused: the container's clock is not the user's
+and never was, and guessing which was meant is how a date lands hours away from
+the thing it records.
+
+The server polices the value it accepts, and both of its rules land in the same
+place. A date in the future is **replaced** with the thread's own date, because
+an email records correspondence that happened and the days ahead belong to the
+calendar; a date that is absent, zoneless or unparseable falls back to exactly
+that same thread date. So the field can only ever move a card backwards onto a
+truer day, never forwards, and getting it wrong costs the card's placement and
+never the verdict — the judgment about the *mail* stands either way.
+
+Those two rules are the *only* ones, and the gap they leave is midnight. A
+date-only source written out as `2026-08-01T00:00:00Z` satisfies both — it
+parses, it carries a zone, it is in the past — so it is accepted verbatim,
+stored verbatim, and only turns into a day when the reader's device resolves it
+against the reader's own clock, where it is the evening of July 31 for everyone
+west of UTC. No counter moves and no value is dropped; the card simply sits one
+day early, and only for some readers. Nothing on the wire can distinguish that
+from a genuine instant that happens to fall on midnight UTC, which is why the
+fix lives in the judgment and not in validation: send a bare calendar date as
+midday. Which date to send, and in what form, is `rubric.md` §5's, not this
+file's.
 
 **Validation, all server-side**
 
@@ -214,6 +244,8 @@ pass-through.
 | `category` must match the enum | verdict → `rejected` |
 | each ref must exist in the live index | that ref stripped, counted in `unvalidated` |
 | slugs normalized (`concept/Foo` → `Foo`) before the check | silently fixed |
+| `occurred_at` must parse as ISO-8601 **with a zone** | dropped, and the thread's own date is used |
+| `occurred_at` must not be in the future | replaced with the thread's own date |
 
 The normalize-then-drop shape is not fussiness: a judge asked to cite slugs
 guesses at the `page_type/` prefix — 21% invalid refs in one probe run, 3% in the

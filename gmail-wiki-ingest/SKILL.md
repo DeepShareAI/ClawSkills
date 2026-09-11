@@ -41,7 +41,7 @@ dozens of times a day. The daily trigger is the whole trigger story.
 node scripts/gmail-wiki-ingest.js fetch   ──►  metadata + knowledge model
         │                                       + recent decisions + trust
         ▼
-   you SELECT, per rubric.md §5 — which threads a body would actually change
+   you SELECT, per rubric.md §6 — which threads a body would actually change
         │
         ▼
 echo '["<thread_id>",…]' | node scripts/gmail-wiki-ingest.js content
@@ -151,7 +151,7 @@ Pipe an array of `item_key`s — thread ids, verbatim from `items` — to stdin:
   "unavailable": [ { "item_key": "…", "reason": "not_in_batch" | "fetch_failed" } ] }
 ```
 
-**Which threads to ask for, and how many, is `rubric.md` §5.** That is the
+**Which threads to ask for, and how many, is `rubric.md` §6.** That is the
 policy, it is meant to be tuned, and it is not repeated here. What this file
 owns is the mechanics:
 
@@ -198,7 +198,11 @@ Pipe the verdict array to stdin:
       "category": "correspondence",
       "score": 0.72,
       "refs": [ { "page_type": "concept", "slug": "Agent-Builder" } ],
-      "reason": "one sentence, plain, ≤ 200 chars" }
+      "reason": "one sentence, plain, ≤ 200 chars",
+      // Optional, and it must carry a zone. Which date to put here — why a
+      // future one is pointless, and why a date-only source goes as midday
+      // rather than midnight — is `rubric.md` §5.
+      "occurred_at": "2026-09-04T17:22:00Z" }
 ]
 ```
 
@@ -417,9 +421,10 @@ one-line "nothing new" rather than a run they cannot see.
 ## References
 
 - **`rubric.md` — the judgment.** The category enum, the score ranges, the
-  citation rule and the body-request policy. It sits at the bundle root rather
-  than in `references/` because it is not background reading: it is the contract
-  this turn applies, and the file to edit when the judging is wrong.
+  citation rule, the date a card is filed under, and the body-request policy.
+  It sits at the bundle root rather than in `references/` because it is not
+  background reading: it is the contract this turn applies, and the file to
+  edit when the judging is wrong.
 - `references/tool-contract.md` — exact wire shapes for the candidate calls, every
   validation rule, the error table, and the cursor/watermark contract.
 - `references/banding-and-trust.md` — how a verdict becomes HIGH / MIDDLE / LOW,

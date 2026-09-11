@@ -100,6 +100,51 @@ test('submit posts the verdict array verbatim', async () => {
   assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
 });
 
+test('submit carries occurred_at through to the body untouched', async () => {
+  // Which day a card files itself under is the skill's judgment (`rubric.md`
+  // §5) and the server's to police, and the script is the wire between them
+  // and nothing else. It must not whitelist the verdict's keys: the whole
+  // reason the judgment lives in this bundle is that it can grow a field
+  // without a server deploy, and a script that reshaped verdicts would put a
+  // second deploy — of the bundle's code, not its prose — back in that path.
+  const f = fakeFetch(ok({ status: 'ok', high: 0, middle: 1, low: 0 }));
+  const verdicts = [{
+    item_key: 't1',
+    score: 0.7,
+    category: 'correspondence',
+    refs: [],
+    reason: 'a receipt forwarded weeks after the purchase it records',
+    occurred_at: '2026-09-04T17:22:00Z',
+  }];
+  const out = await cli.doSubmit(verdicts, deps(f));
+  assert.equal(out.middle, 1);
+  assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
+  // Spelled out separately from the deepEqual above, because that assertion
+  // would still pass if a future change dropped the key on both sides.
+  assert.equal(f.calls[0].body.verdicts[0].occurred_at, '2026-09-04T17:22:00Z');
+});
+
+test('a verdict with no occurred_at submits unchanged', async () => {
+  // The field is optional the whole way down, and the fallback belongs to the
+  // server — it holds the thread's real newest-message instant and the
+  // container holds only its own clock. So an undated verdict must arrive
+  // undated: a date stamped in here would be the run's time, not the mail's,
+  // and it would file the card on the day it was judged while looking exactly
+  // like a date the agent had chosen.
+  const f = fakeFetch(ok({ status: 'ok', high: 0, middle: 1, low: 0 }));
+  const verdicts = [{
+    item_key: 't1',
+    score: 0.7,
+    category: 'correspondence',
+    refs: [],
+    reason: 'one sentence',
+  }];
+  const out = await cli.doSubmit(verdicts, deps(f));
+  assert.equal(out.middle, 1);
+  assert.deepEqual(f.calls[0].body, { skill: 'gmail-wiki-ingest', verdicts });
+  assert.equal('occurred_at' in f.calls[0].body.verdicts[0], false);
+});
+
 test('submit refuses a non-array rather than coercing it', async () => {
   // An empty submit is MEANINGFUL: it says the batch was judged and nothing was
   // worth keeping, and it promotes the cursor past every item in it. Coercing a
@@ -1069,4 +1114,38 @@ test('the rubric says which element of a node row the slug is', () => {
   // reading the wrong element yields a ref that looks plausible and validates
   // against nothing.
   assert.match(DOCS['rubric.md'], /nodes\[i\]\[1\]/);
+});
+
+test('the rubric sends a date-only occurred_at as midday, not midnight', () => {
+  // The rubric's own headline case — "a receipt forwarded weeks later belongs
+  // on the purchase date" — is the one that hands the agent a bare calendar
+  // date, and the canonical way to write a bare date with the required zone is
+  // `T00:00:00Z`. That instant is the previous evening everywhere west of UTC,
+  // so an August 1 purchase files under July 31 for a Pacific user: the exact
+  // off-by-a-day this field was added to remove. It cannot be caught anywhere
+  // else — the server accepts it (parses, zoned, past), no counter moves, and
+  // it renders correctly for a UTC or Shanghai reader, so a test run outside
+  // the Americas sees nothing. The rule therefore has to be in the prose the
+  // agent reads, which makes this the only place it can be pinned.
+  const text = DOCS['rubric.md'];
+  assert.match(text, /midday/,
+    'rubric §5 no longer tells the agent what time of day a bare date carries');
+  assert.match(text, /2026-08-01T12:00:00Z/,
+    'rubric §5 must SHOW the midday form; the agent copies the example, and ' +
+    'the only worked example used to be an instant with a real time on it');
+  assert.match(text, /midnight/,
+    'rubric §5 must name midnight as the wrong answer, not merely imply it');
+});
+
+test('the wire contract says midnight is accepted rather than policed', () => {
+  // tool-contract.md lists the server's two rules (zoned, not future) as a
+  // table, which reads as an exhaustive gate. A midnight-UTC value passes both
+  // and is still wrong, so the contract has to say the gap is there — a reader
+  // who takes the table as complete concludes anything accepted is placed
+  // correctly.
+  const text = DOCS['references/tool-contract.md'];
+  assert.match(text, /2026-08-01T00:00:00Z/,
+    'the contract must show the value that slips through, not describe it');
+  assert.match(text, /midday/,
+    'the contract must point at the fix it expects the skill to apply');
 });

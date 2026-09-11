@@ -1115,3 +1115,37 @@ test('the rubric says which element of a node row the slug is', () => {
   // against nothing.
   assert.match(DOCS['rubric.md'], /nodes\[i\]\[1\]/);
 });
+
+test('the rubric sends a date-only occurred_at as midday, not midnight', () => {
+  // The rubric's own headline case — "a receipt forwarded weeks later belongs
+  // on the purchase date" — is the one that hands the agent a bare calendar
+  // date, and the canonical way to write a bare date with the required zone is
+  // `T00:00:00Z`. That instant is the previous evening everywhere west of UTC,
+  // so an August 1 purchase files under July 31 for a Pacific user: the exact
+  // off-by-a-day this field was added to remove. It cannot be caught anywhere
+  // else — the server accepts it (parses, zoned, past), no counter moves, and
+  // it renders correctly for a UTC or Shanghai reader, so a test run outside
+  // the Americas sees nothing. The rule therefore has to be in the prose the
+  // agent reads, which makes this the only place it can be pinned.
+  const text = DOCS['rubric.md'];
+  assert.match(text, /midday/,
+    'rubric §5 no longer tells the agent what time of day a bare date carries');
+  assert.match(text, /2026-08-01T12:00:00Z/,
+    'rubric §5 must SHOW the midday form; the agent copies the example, and ' +
+    'the only worked example used to be an instant with a real time on it');
+  assert.match(text, /midnight/,
+    'rubric §5 must name midnight as the wrong answer, not merely imply it');
+});
+
+test('the wire contract says midnight is accepted rather than policed', () => {
+  // tool-contract.md lists the server's two rules (zoned, not future) as a
+  // table, which reads as an exhaustive gate. A midnight-UTC value passes both
+  // and is still wrong, so the contract has to say the gap is there — a reader
+  // who takes the table as complete concludes anything accepted is placed
+  // correctly.
+  const text = DOCS['references/tool-contract.md'];
+  assert.match(text, /2026-08-01T00:00:00Z/,
+    'the contract must show the value that slips through, not describe it');
+  assert.match(text, /midday/,
+    'the contract must point at the fix it expects the skill to apply');
+});

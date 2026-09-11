@@ -199,8 +199,9 @@ Pipe the verdict array to stdin:
       "score": 0.72,
       "refs": [ { "page_type": "concept", "slug": "Agent-Builder" } ],
       "reason": "one sentence, plain, ≤ 200 chars",
-      // Optional, and it must carry a zone. Which date to put here — and why a
-      // future one is pointless — is `rubric.md` §5.
+      // Optional, and it must carry a zone. Which date to put here — why a
+      // future one is pointless, and why a date-only source goes as midday
+      // rather than midnight — is `rubric.md` §5.
       "occurred_at": "2026-09-04T17:22:00Z" }
 ]
 ```

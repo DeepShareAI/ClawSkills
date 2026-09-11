@@ -221,8 +221,19 @@ an email records correspondence that happened and the days ahead belong to the
 calendar; a date that is absent, zoneless or unparseable falls back to exactly
 that same thread date. So the field can only ever move a card backwards onto a
 truer day, never forwards, and getting it wrong costs the card's placement and
-never the verdict — the judgment about the *mail* stands either way. Which date
-to send is `rubric.md` §5's, not this file's.
+never the verdict — the judgment about the *mail* stands either way.
+
+Those two rules are the *only* ones, and the gap they leave is midnight. A
+date-only source written out as `2026-08-01T00:00:00Z` satisfies both — it
+parses, it carries a zone, it is in the past — so it is accepted verbatim,
+stored verbatim, and only turns into a day when the reader's device resolves it
+against the reader's own clock, where it is the evening of July 31 for everyone
+west of UTC. No counter moves and no value is dropped; the card simply sits one
+day early, and only for some readers. Nothing on the wire can distinguish that
+from a genuine instant that happens to fall on midnight UTC, which is why the
+fix lives in the judgment and not in validation: send a bare calendar date as
+midday. Which date to send, and in what form, is `rubric.md` §5's, not this
+file's.
 
 **Validation, all server-side**
 

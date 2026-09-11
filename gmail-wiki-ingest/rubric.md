@@ -152,6 +152,25 @@ reading task, not an inference from the topic — a date you guessed at files th
 card on a day nothing happened, and the user has no way to tell it apart from
 one you found.
 
+**When the source gives you only a calendar date, send midday — never
+midnight.** "Order date: August 1, 2026" carries no time and no zone, and the
+obvious way to write it down, `2026-08-01T00:00:00Z`, is 5pm on July 31 in
+California. The card then files under the day *before* the purchase, which is
+the same class of error this whole field exists to correct, and nothing
+downstream catches it: midnight UTC parses, it carries a zone, it is in the
+past, so the server accepts it and the day it lands on is decided later by the
+reader's own clock. Send `2026-08-01T12:00:00Z` instead — midday holds that
+calendar date for every zone from UTC-12 through UTC+11, so the only readers it
+can still slip past are the far side of the date line. If the thread's own
+`date` header carries an explicit offset, prefer noon at that offset
+(`2026-08-01T12:00:00-07:00`); a forward the user sent themselves is stamped in
+the user's own zone, which makes the placement exact rather than merely safe.
+
+The container's clock is no help in checking this. A midnight value renders as
+the right day for a UTC or Shanghai reader and as the day before for every
+reader in the Americas, so it looks correct from wherever the run happens to be
+executing, and it is the user's device — not this run — that decides.
+
 **Never choose a future date.** The server replaces it with the thread's own
 date, so a future value buys nothing and throws away the choice you were making.
 An email records correspondence that already happened; the days ahead of today

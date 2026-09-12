@@ -9,7 +9,7 @@ which shipped as `0.6.3` (`059eef7`), and C1 then passed on the fixed bundle.
 **Field runbook:** https://claude.ai/code/artifact/f3a83208-7ea1-4585-ac1e-53b34dc36015
 — the same 22 cases as a tickable page that remembers what you ticked. This file
 is the precise version; the runbook is what you hold while looking at the phone.
-**Status:** Server half PASSED on 0.6.3. D cases outstanding.
+**Status:** Server half and D1–D3 PASSED on 0.6.3. D5 blocked on a second day.
 
 ## Objective
 
@@ -261,7 +261,13 @@ Run against `openclaw-user-db62abae6405` on prod, session
 | **C1 stored row** | **FAIL** | **pass** | `20:12:21` → `13:12:21` |
 | B4 undated write | — | pass | card written, success reported |
 | B5 no invention | — | pass | `start_at NULL` |
-| D1–D6 | not run | not run | needs the fixed bundle on the simulator's account |
+| A3 envelope narrow / memory wide | — | pass | envelope 1 session, map 16 — 15 siblings the envelope never carried |
+| A4 zero-session fetch preserves map | — | pass | map sha256 `cf9d501bed7e8abb` identical before and after |
+| **D1** pending rides today | — | pass | Sep-8-anchored card sat under `Fri, Sep 11 · Today`, dashed, Confirm/Discard |
+| **D2** Confirm files it | — | pass | left today's block into a **newly created** Sep 8 section |
+| **D3** header correct | — | pass | `Tue, Sep 8`, solid card, `9:51 – 10:24 AM` |
+| D4, D6, B2, B3, C2, E1–E4 | — | not run | — |
+| D5 next-day stability | — | **blocked** | needs a second calendar day |
 
 ### What C1 caught
 
@@ -285,6 +291,36 @@ to the environment. Only a container with `TZ` unset does that, and only a real
 row read back in the user's zone makes the seven hours visible. C1 was written
 to assert the stored value rather than the code path, which is the reason it
 worked.
+
+### The D run, and what was synthetic about it
+
+The simulator is signed in to `wmp425@gmail.com` (`openclaw-user-db62abae6405`),
+**not** `samuel@deepshare.ai`. That account has exactly one session, from today,
+so no *real* card there could be anchored to an earlier day.
+
+Rather than hand-write a row — which this plan forbids for C1 — an older session
+**window** was injected into the skill's state file, the artifact a real earlier
+fetch would have left, and a bare card was pushed through the skill so it derived
+the anchor itself. The skill produced `2026-09-08 09:51:19` from
+`2026-09-08T16:51:19.085Z` plus the remembered tz, unaided.
+
+So D1–D3 exercise the real skill path end to end; only the remembered window was
+synthetic. C1 had already proved the derivation against a genuine session, so the
+two halves cover each other. **A3 and A4 ran in `openclaw-user-8ba916898816`**
+instead, because neither is demonstrable in a container holding one session.
+
+### Two setup errors worth recording
+
+Both first attempts looked like product failures and were not. A plan that does
+not record them invites the next runner to file the same false bugs.
+
+- **A3 with a keyboard session returned an empty envelope.** `filterToUnit`
+  excludes keyboard sessions from `--session` by design — `--kbd-input` is the
+  keyboard door. Use an **audio** session id for A3.
+- **A4 compared `hash()` of the map across two `python3` processes.** Python
+  salts `hash()` per process, so the digests differed and the map looked
+  modified. Use `hashlib.sha256`, and assert the digest rather than the entry
+  count — "still 16 entries" is the weaker claim.
 
 ### Residual state
 

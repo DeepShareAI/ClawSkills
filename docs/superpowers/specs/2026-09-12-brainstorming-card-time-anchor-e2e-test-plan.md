@@ -37,11 +37,23 @@ why G2 greps the running bundle rather than trusting `skills list`.
 
 ## Preconditions
 
-- `javis-brainstorming@0.6.3` in the container. **ClawHub's `latest` tag lags a
-  publish by an unknown interval** — observed twice on 2026-09-12, where
-  `openclaw skills update` pulled 0.6.2 minutes after 0.6.3 published cleanly.
-  When it lags, side-load the bundle to test: `tar czf` the bundle, `scp` to the
-  host, `docker cp` into the container, untar over the skill dir.
+- `javis-brainstorming@0.6.3` in the container. **A publish does not serve
+  immediately: the `latest` tag moves only after the `review.llm_review`
+  moderation scan clears, which took 4 min 51 s for 0.6.3** (published
+  `05:31:12Z`, cleared `05:36:04Z`). Running `openclaw skills update` inside that
+  window pulls the *previous* version and looks like a failed publish — it is
+  not. Wait for `clawhub inspect <slug> --json` to report the new
+  `tags.latest`, then update.
+
+  Note that `clawhub inspect <slug>@<version>` reports "Skill not found or
+  unavailable to this account" when rate-limited, which is indistinguishable
+  from a version that genuinely does not exist. Read `tags.latest` from the
+  unversioned `--json` inspect instead; it is the reliable signal.
+
+  To test before the scan clears, side-load: `tar czf` the bundle, `scp` to the
+  host, `docker cp` into the container, untar over the skill dir. A later
+  `openclaw skills update` overwrites the side-load with the registry bundle,
+  so the state is self-healing.
 - A QA user whose container is running. Container name is
   `openclaw-user-<sha256(user_id)[:12]>`; workdir `/home/node/.openclaw/workspace`.
 - SSH to the prod host; `docker exec` available.
@@ -324,7 +336,9 @@ not record them invites the next runner to file the same false bugs.
 
 ### Residual state
 
-- The container runs a **side-loaded** 0.6.3 while ClawHub's `latest` says
-  0.6.2. The next sweep reconciles once the tag moves.
+- ~~The container runs a side-loaded 0.6.3~~ — **resolved.** `latest` moved to
+  0.6.3 once moderation cleared, and both
+  `openclaw-user-db62abae6405` and `openclaw-user-8ba916898816` were updated
+  from the registry (`0.6.2 -> 0.6.3`), overwriting the hand-copied bundles.
 - Four QA cards were written and deleted; `seen` was cleared. `state.tz` was
   left in place — real derived state, not test residue.

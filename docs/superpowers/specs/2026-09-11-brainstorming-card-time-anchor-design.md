@@ -71,10 +71,11 @@ Everything else in this section follows from it.
 
 There is no by-id session endpoint. `fetch --session <id>` is
 `GET /api/transcripts/recent?since=now-24h&limit=50` filtered client-side
-(`scripts/brainstorming.js:145`, `:166`). Recovering one old session means
-widening a window against an endpoint that emits one entry per
-`audio_recordings` row and saturates its limit — a guess, layered on a known
-saturation problem, on the degraded path.
+(`scripts/brainstorming.js:145`, `:166`). That endpoint groups by `session_id`
+and returns the `limit` most recent sessions by `ended_at`
+(`javis-server/app/routers/transcription.py:411-422`, `:474`), so recovering an
+older session means guessing a wider `--hours`/`--limit` and re-paying the fetch
+— on the degraded path, to recover a value the skill already had.
 
 ### 3. A dateless card cannot be repaired, but it can be moved
 
@@ -276,7 +277,7 @@ appears under the session's own date.
 
 One PR, one bundle.
 
-1. `brainstorming` bumps to **0.5.1**: the map in `doFetch`, the union in
+1. `brainstorming` bumps to **0.6.0**: the map in `doFetch`, the union in
    `doPush`, the pruning and cap, the `SKILL.md` wording, the tests.
 2. Published to ClawHub, it reaches every per-user container through the
    existing 12-hour skill-update sweep on javis-server.

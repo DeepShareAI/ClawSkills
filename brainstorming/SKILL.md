@@ -71,7 +71,9 @@ emits one to-do-card JSON object.
    `fetch` also **remembers** each returned session's `started_at`/`ended_at` (raw
    instants) in `data/users/<userId>.json` → `sessionWindows`, pruned on the same
    30-day TTL as `seen` and capped at 500 entries, so step 3 can stamp the card's
-   journal window whether or not the sessions are piped back.
+   journal window whether or not the sessions are piped back. It remembers EVERY
+   session the server returned, including the ones `--session`/`--kbd-input` filter
+   out of the envelope — the envelope still narrows to the unit you asked for.
 
 2. **Compose** — the agent reads that JSON and decides whether there is a discernible
    **goal** and **request**. If there is none, **emit no card** (silence is a valid

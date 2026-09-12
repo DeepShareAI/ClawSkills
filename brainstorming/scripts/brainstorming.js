@@ -220,20 +220,25 @@ async function doFetch(opts = {}, deps = {}) {
   const data = await httpGet(url, token);
 
   const isEnvelope = data && typeof data === 'object' && !Array.isArray(data);
-  let sessions = isEnvelope
+  // Everything the server returned, BEFORE --session/--kbd-input narrows it.
+  const fetched = isEnvelope
     ? (Array.isArray(data.sessions) ? data.sessions : [])
     : (Array.isArray(data) ? data : []);
 
-  if (!kbdFilter) sessions = filterToUnit(sessions, { sessionFilter });
+  const sessions = kbdFilter ? fetched : filterToUnit(fetched, { sessionFilter });
 
   const base = isEnvelope ? data : {};
   const payloadTz = 'tz' in opts ? opts.tz : (deps.tz != null ? deps.tz : base.tz);
   const tz = resolveTz(payloadTz);
 
+  // Remember EVERY session this fetch returned, not just the one --session
+  // narrowed the envelope to. The window costs nothing to keep, and a card whose
+  // source_refs cite a sibling session from the same fetch still gets its day.
+  //
   // Remembering is NON-FATAL: an unwritable state file must never cost the agent
   // the envelope it is waiting on (the card then degrades to the piped-sessions
   // path, exactly as before this design).
-  try { rememberSessionWindows(sessions, nowIso, { load, save }); }
+  try { rememberSessionWindows(fetched, nowIso, { load, save }); }
   catch (e) { console.error('⚠️ session-window memory not updated (non-fatal):', e.message); }
 
   // The relative-date anchor lets the agent resolve "today" coherently if the

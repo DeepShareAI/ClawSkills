@@ -544,6 +544,46 @@ test('doFetch writes each returned session into sessionWindows and leaves seen/l
   assert.equal(store.box.state.lastRunAt, FRESH, '`lastRunAt` is push-owned');
 });
 
+test('doFetch --session remembers EVERY fetched session, not just the one the envelope narrows to', async () => {
+  const store = makeStore({ userId: 'self' });
+  const payload = {
+    sessions: [
+      { session_id: 'aud-1', source: 'audio', started_at: '2026-06-09T19:05:00.000Z', ended_at: '2026-06-09T19:30:00.000Z', transcript: 'the unit' },
+      { session_id: 'aud-2', source: 'audio', started_at: '2026-06-09T17:00:00.000Z', ended_at: '2026-06-09T17:20:00.000Z', transcript: 'a sibling' },
+      { session_id: 'aud-3', source: 'audio', started_at: '2026-06-09T15:00:00.000Z', transcript: 'another sibling' },
+    ],
+  };
+  let emitted;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    { httpGet: async () => payload, now: NOW, emit: (o) => { emitted = o; }, ...store }
+  );
+
+  // The envelope still narrows -- the agent sees only the dispatcher's unit.
+  assert.equal(emitted.sessions.length, 1, 'the envelope is still filtered to the unit');
+  assert.equal(emitted.sessions[0].session_id, 'aud-1');
+
+  // The memory does not. A card citing a sibling from the same fetch still gets its day.
+  assert.deepEqual(
+    Object.keys(store.box.state.sessionWindows).sort(),
+    ['aud-1', 'aud-2', 'aud-3'],
+    'every fetched session is remembered, filtered or not'
+  );
+
+  // And push can anchor from a sibling the envelope never carried.
+  const client = makeClient();
+  await doPush({
+    token: 't',
+    client,
+    card: normalizeCard({ ...SAMPLE_CARD, source_refs: ['aud-2'] }),
+    now: NOW,
+    ...store,
+  });
+  const item = client.calls.write[0][0];
+  assert.equal(item.start_at, '2026-06-09T10:00:00', 'anchored from a sibling session the envelope did not carry');
+  assert.equal(item.end_at, '2026-06-09T10:20:00');
+});
+
 test('doFetch records started_at alone for a session with no ended_at; push then stamps start_at only', async () => {
   const store = makeStore({ userId: 'self' });
   const payload = {

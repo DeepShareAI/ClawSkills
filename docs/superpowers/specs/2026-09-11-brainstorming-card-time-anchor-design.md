@@ -138,6 +138,12 @@ moment; this map feeds it the same kind of value the envelope does.
 (`scripts/brainstorming.js:292-293`), so the write stays injectable and the
 existing test style applies unchanged.
 
+**It remembers every session the server returned, not the filtered envelope.**
+`--session`/`--kbd-input` narrow what the agent is shown; they should not narrow
+what the skill knows. A window costs nothing to keep, and remembering the whole
+fetch means a card whose `source_refs` cite a sibling session from that same
+fetch still gets its day. The narrowing stays where it belongs — on the envelope.
+
 **Pruning reuses what exists.** `pruneByTtl(map, tsOf, ttlDays)`
 (`scripts/lib.js:220`) already takes a timestamp accessor, so the map prunes with
 `pruneByTtl(state.sessionWindows, (w) => w.seen_at, SEEN_TTL_DAYS)` — the same

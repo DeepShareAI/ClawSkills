@@ -182,8 +182,19 @@ function filterToUnit(sessions, { sessionFilter }) {
 // seen_at), then keeps at most its SESSION_WINDOWS_MAX most recent entries. A
 // fetch that returned zero sessions leaves the existing map in place — it is
 // never cleared — and `seen` / `lastRunAt` are never touched here.
-function rememberSessionWindows(sessions, nowIso, { load, save }) {
+//
+// It also records `state.tz` — but ONLY the tz the SERVER supplied on the fetch
+// envelope. `push` falls back to it when the agent pipes no `tz`, which is the
+// same defect the session map fixes: the agent had to re-pipe a value the skill
+// already had. Recording a fallback-derived tz instead would be worse than
+// recording nothing — the container runs with TZ unset, so `resolveTz` yields
+// UTC, and persisting that would make every later card STICKILY wrong by the
+// user's whole offset (verified on prod 2026-09-12: a bare-card push wrote
+// 20:12 for a session that started 13:12 local).
+function rememberSessionWindows(sessions, nowIso, { load, save }, serverTz) {
   const state = load();
+  const tz = (serverTz == null ? '' : String(serverTz)).trim();
+  if (tz) state.tz = tz;
   const kept = pruneByTtl(state.sessionWindows || {}, (w) => w && w.seen_at, SEEN_TTL_DAYS);
   for (const s of Array.isArray(sessions) ? sessions : []) {
     const id = sessionId(s);
@@ -238,7 +249,7 @@ async function doFetch(opts = {}, deps = {}) {
   // Remembering is NON-FATAL: an unwritable state file must never cost the agent
   // the envelope it is waiting on (the card then degrades to the piped-sessions
   // path, exactly as before this design).
-  try { rememberSessionWindows(fetched, nowIso, { load, save }); }
+  try { rememberSessionWindows(fetched, nowIso, { load, save }, payloadTz); }
   catch (e) { console.error('⚠️ session-window memory not updated (non-fatal):', e.message); }
 
   // The relative-date anchor lets the agent resolve "today" coherently if the
@@ -387,10 +398,17 @@ async function doPush(deps = {}) {
   const stdin = 'card' in deps ? null : await readStdinPush();
   const card = 'card' in deps ? deps.card : stdin.card;
   const sessions = 'sessions' in deps ? deps.sessions : (stdin ? stdin.sessions : []);
-  const tz = resolveTz('tz' in deps ? deps.tz : (stdin ? stdin.tz : null));
   const digest = deps.digest !== undefined ? deps.digest : true;
 
   const state = load();
+  // tz precedence: piped -> the tz `fetch` remembered from the server -> TZ env
+  // -> system zone. The remembered rung is why a BARE card is anchored in the
+  // USER's zone: the container runs with TZ unset, so without it resolveTz lands
+  // on UTC and toNaiveLocal writes the UTC wall-clock as if it were local — a
+  // whole-offset error that moves an evening session to the next day, which is
+  // the exact class of bug the journal window exists to prevent.
+  const pipedTz = 'tz' in deps ? deps.tz : (stdin ? stdin.tz : null);
+  const tz = resolveTz(pipedTz || state.tz);
   const seen = pruneSeen(state.seen || {});
   const nowIso = deps.now ? deps.now() : new Date().toISOString();
 

@@ -74,6 +74,8 @@ emits one to-do-card JSON object.
    journal window whether or not the sessions are piped back. It remembers EVERY
    session the server returned, including the ones `--session`/`--kbd-input` filter
    out of the envelope — the envelope still narrows to the unit you asked for.
+   The envelope's `tz` is remembered too, so a bare card is anchored in YOUR zone
+   rather than the container's UTC.
 
 2. **Compose** — the agent reads that JSON and decides whether there is a discernible
    **goal** and **request**. If there is none, **emit no card** (silence is a valid

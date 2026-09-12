@@ -169,6 +169,38 @@ read of the same fact.
 `sessionWindow`'s signature and behavior do not change. It keeps taking an array
 of session-shaped objects, and the caller hands it the union.
 
+### C-bis. The tz is the same dependency, and was missed
+
+**Added 2026-09-12, after E2E found it on prod.** §C removed push's dependency
+on the agent re-piping `sessions` and left the identical dependency on `tz`
+standing beside it.
+
+`doPush` resolved `tz` from stdin alone. A bare card pipes none, so
+`resolveTz(null)` fell through to the `TZ` env var and then the system zone —
+and the container runs with `TZ` unset, so Node answers `UTC`. `toNaiveLocal`
+then rendered the UTC wall-clock and stored it as local.
+
+Measured on prod (`openclaw-user-db62abae6405`, bundle 0.6.2), two pushes of the
+same session minutes apart:
+
+| push | stored `start_at` |
+|---|---|
+| with `tz` piped | `2026-09-11 13:12:21` — correct PT |
+| bare card | `2026-09-11 20:12:21` — UTC relabelled as local |
+
+Seven hours. For any session after 17:00 PT the UTC wall-clock lands on the
+**next calendar day**, so the change reintroduced the wrong-day placement it was
+built to remove, on precisely the bare-card path it exists to support.
+
+The fix has the shape of §B. `fetch` already resolves the right zone — the
+server echoes the user's tz on the envelope — so it remembers it as `state.tz`,
+and `push` resolves `pipedTz || state.tz` before the env and system rungs.
+
+**Only a server-supplied tz is remembered.** Persisting a fallback-derived one
+would write `UTC` into the state file and make every later card stickily wrong
+by the user's whole offset — worse than remembering nothing, because the next
+fetch would not correct it.
+
 ### D. What happens when both sources miss
 
 The card is written with no dates, exactly as today.
@@ -283,7 +315,7 @@ appears under the session's own date.
 
 One PR, one bundle.
 
-1. `brainstorming` bumps to **0.6.2**: the map in `doFetch`, the union in
+1. `brainstorming` bumps to **0.6.3**: the map in `doFetch`, the union in
    `doPush`, the pruning and cap, the `SKILL.md` wording, the tests.
 2. Published to ClawHub, it reaches every per-user container through the
    existing 12-hour skill-update sweep on javis-server.

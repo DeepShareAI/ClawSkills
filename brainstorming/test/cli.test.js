@@ -544,6 +544,67 @@ test('doFetch writes each returned session into sessionWindows and leaves seen/l
   assert.equal(store.box.state.lastRunAt, FRESH, '`lastRunAt` is push-owned');
 });
 
+// ---- tz: the second thing push must not depend on the agent re-piping -------
+// Found on prod 2026-09-12: the container runs with TZ unset, so a bare card
+// (no piped tz) resolved to UTC and toNaiveLocal wrote the UTC wall-clock as if
+// it were local — 20:12 for a session that started 13:12 in the user's zone. An
+// evening session lands on the NEXT DAY, which is the placement bug the journal
+// window exists to prevent.
+test('doFetch remembers the SERVER tz; push anchors a bare card in it even when the container is UTC', async () => {
+  const store = makeStore({ userId: 'self' });
+  const savedTz = process.env.TZ;
+  try {
+    process.env.TZ = 'UTC';  // the container, faithfully
+    await doFetch(
+      { token: 't', sessionFilter: null, kbdFilter: null, hours: 24, limit: 50 },
+      {
+        httpGet: async () => ({
+          tz: 'America/Los_Angeles',
+          sessions: [{ session_id: 'sess-tz', source: 'audio', started_at: '2026-09-11T20:12:21.053Z', ended_at: '2026-09-11T20:14:57.432Z' }],
+        }),
+        now: NOW, emit: () => {}, ...store,
+      }
+    );
+    assert.equal(store.box.state.tz, 'America/Los_Angeles', 'fetch records the server tz');
+
+    const client = makeClient();
+    await doPush({
+      token: 't', client,
+      card: normalizeCard({ ...SAMPLE_CARD, title: 'tz probe', source_refs: ['sess-tz'] }),
+      now: NOW, ...store,
+    });
+    const item = client.calls.write[0][0];
+    assert.equal(item.start_at, '2026-09-11T13:12:21', 'anchored in the USER tz, not the container UTC');
+    assert.equal(item.end_at, '2026-09-11T13:14:57');
+  } finally {
+    if (savedTz === undefined) delete process.env.TZ; else process.env.TZ = savedTz;
+  }
+});
+
+test('a piped tz still wins over the remembered one', async () => {
+  const store = makeStore({ userId: 'self', tz: 'America/Los_Angeles', sessionWindows: {
+    'sess-tz': { started_at: '2026-09-11T20:12:21.053Z', seen_at: NOW() },
+  } });
+  const client = makeClient();
+  await doPush({
+    token: 't', client, tz: 'Asia/Tokyo',
+    card: normalizeCard({ ...SAMPLE_CARD, title: 'piped tz probe', source_refs: ['sess-tz'] }),
+    now: NOW, ...store,
+  });
+  assert.equal(client.calls.write[0][0].start_at, '2026-09-12T05:12:21', 'piped Tokyo beats remembered LA');
+});
+
+test('doFetch does NOT remember a tz the server did not supply', async () => {
+  const store = makeStore({ userId: 'self' });
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: null, hours: 24, limit: 50 },
+    { httpGet: async () => ({ sessions: [{ session_id: 's1', source: 'audio', started_at: '2026-06-09T19:05:00.000Z' }] }),
+      now: NOW, emit: () => {}, ...store }
+  );
+  assert.equal(store.box.state.tz, undefined,
+    'persisting a fallback-derived tz would make every later card stickily wrong');
+});
+
 test('doFetch --session remembers EVERY fetched session, not just the one the envelope narrows to', async () => {
   const store = makeStore({ userId: 'self' });
   const payload = {

@@ -283,7 +283,7 @@ appears under the session's own date.
 
 One PR, one bundle.
 
-1. `brainstorming` bumps to **0.6.0**: the map in `doFetch`, the union in
+1. `brainstorming` bumps to **0.6.2**: the map in `doFetch`, the union in
    `doPush`, the pruning and cap, the `SKILL.md` wording, the tests.
 2. Published to ClawHub, it reaches every per-user container through the
    existing 12-hour skill-update sweep on javis-server.

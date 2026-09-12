@@ -1,15 +1,15 @@
 # E2E Verification Plan — the brainstorm card's time anchor
 
 **Date:** 2026-09-12
-**Type:** End-to-end verification plan. The change is merged to `main`
-(`25a5b44`, bundle `0.6.2` at `00142dc`) but **not yet serving**: ClawHub still
-reports `latest=0.5.0`, so no container has it. This plan gates the publish and
-the rollout that follows it.
+**Type:** End-to-end verification plan, **executed 2026-09-12** against prod
+container `openclaw-user-db62abae6405`. The server half (G, A, B, C) ran; the
+iOS half (D) did not. The run found a blocking defect at C1 — see Results —
+which shipped as `0.6.3` (`059eef7`), and C1 then passed on the fixed bundle.
 **Design spec:** [`2026-09-11-brainstorming-card-time-anchor-design.md`](2026-09-11-brainstorming-card-time-anchor-design.md)
 **Field runbook:** https://claude.ai/code/artifact/f3a83208-7ea1-4585-ac1e-53b34dc36015
 — the same 22 cases as a tickable page that remembers what you ticked. This file
 is the precise version; the runbook is what you hold while looking at the phone.
-**Status:** Plan — not yet executed
+**Status:** Server half PASSED on 0.6.3. D cases outstanding.
 
 ## Objective
 
@@ -37,7 +37,11 @@ why G2 greps the running bundle rather than trusting `skills list`.
 
 ## Preconditions
 
-- `javis-brainstorming@0.6.2` published to ClawHub and carrying the `latest` tag.
+- `javis-brainstorming@0.6.3` in the container. **ClawHub's `latest` tag lags a
+  publish by an unknown interval** — observed twice on 2026-09-12, where
+  `openclaw skills update` pulled 0.6.2 minutes after 0.6.3 published cleanly.
+  When it lags, side-load the bundle to test: `tar czf` the bundle, `scp` to the
+  host, `docker cp` into the container, untar over the skill dir.
 - A QA user whose container is running. Container name is
   `openclaw-user-<sha256(user_id)[:12]>`; workdir `/home/node/.openclaw/workspace`.
 - SSH to the prod host; `docker exec` available.
@@ -237,3 +241,54 @@ before any user's container has swept.
 Use the runbook artifact for the live pass; it holds the same cases as tickable
 rows with space for the observed value. This file is the precise version — where
 the two disagree, this one is right.
+
+---
+
+## Results — 2026-09-12
+
+Run against `openclaw-user-db62abae6405` on prod, session
+`145f65ddd738c8562763b89a5651a12c` (started `2026-09-11T20:12:21.053Z`, user tz
+`America/Los_Angeles`, so the correct naive-local anchor is `13:12:21`).
+
+| Case | 0.6.2 | 0.6.3 | Evidence |
+|---|---|---|---|
+| G1 version | pass | pass | `0.6.2` / `0.6.3` in the container |
+| G2 fix present | pass | pass | `unionSessions`, `rememberSessionWindows(fetched…)`, `pipedTz \|\| state.tz` |
+| A1 map written | pass | pass | one `sessionWindows` entry |
+| A2 raw instants | pass | pass | `"2026-09-11T20:12:21.053Z"` |
+| tz remembered | — | pass | `state.tz = America/Los_Angeles` |
+| B1 bare card anchored | pass | pass | row carries `start_at` |
+| **C1 stored row** | **FAIL** | **pass** | `20:12:21` → `13:12:21` |
+| B4 undated write | — | pass | card written, success reported |
+| B5 no invention | — | pass | `start_at NULL` |
+| D1–D6 | not run | not run | needs the fixed bundle on the simulator's account |
+
+### What C1 caught
+
+The design removed push's dependency on the agent re-piping `sessions` and left
+the identical dependency on `tz`. The container runs with `TZ` unset, so a bare
+card resolved to `UTC` and `toNaiveLocal` stored the UTC wall-clock as local.
+Two pushes of the same session, minutes apart:
+
+| push | stored `start_at` |
+|---|---|
+| `tz` piped | `2026-09-11 13:12:21` |
+| bare card | `2026-09-11 20:12:21` |
+
+For any session after 17:00 PT the UTC wall-clock is the **next calendar day**,
+so 0.6.2 reintroduced the wrong-day placement the design exists to remove, on
+the very path it exists to support. Fixed in 0.6.3 (design §C-bis).
+
+**Why the plan caught it and the unit tests did not.** The suite injects `tz`
+into every `doPush` call, so no test ever exercised `resolveTz` falling through
+to the environment. Only a container with `TZ` unset does that, and only a real
+row read back in the user's zone makes the seven hours visible. C1 was written
+to assert the stored value rather than the code path, which is the reason it
+worked.
+
+### Residual state
+
+- The container runs a **side-loaded** 0.6.3 while ClawHub's `latest` says
+  0.6.2. The next sweep reconciles once the tag moves.
+- Four QA cards were written and deleted; `seen` was cleared. `state.tz` was
+  left in place — real derived state, not test residue.

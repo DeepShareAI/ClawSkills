@@ -49,8 +49,8 @@ node scripts/brainstorming.js fetch --session <sessionId> [--hours N]   # audio 
 node scripts/brainstorming.js fetch --kbd-input <inputId> [--hours N]   # keyboard unit
 
 # Step 2 — push: pipe the composed to-do-card JSON to stdin; dedups (seen) + writes type=todo pending + delivers the chat digest.
-# Include the fetch payload's `sessions` and `tz` alongside the card so push can
-# stamp the card's start_at/end_at from the source session's times.
+# Including the fetch payload's `sessions` and `tz` is the documented call; when
+# they are absent push anchors the card from the session windows `fetch` remembered.
 echo '{"card": <todo-card-json>, "sessions": <fetch.sessions>, "tz": "<fetch.tz>"}' | node scripts/brainstorming.js push
 ```
 
@@ -68,6 +68,12 @@ emits one to-do-card JSON object.
    `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript, source } ] }`.
    If fetch fails, returns invalid JSON, or yields zero sessions, output nothing and
    do not push; report the failure only if the user asked for a diagnostic.
+   `fetch` also **remembers** each returned session's `started_at`/`ended_at` (raw
+   instants) in `data/users/<userId>.json` → `sessionWindows`, pruned on the same
+   30-day TTL as `seen` and capped at 500 entries, so step 3 can stamp the card's
+   journal window whether or not the sessions are piped back. It remembers EVERY
+   session the server returned, including the ones `--session`/`--kbd-input` filter
+   out of the envelope — the envelope still narrows to the unit you asked for.
 
 2. **Compose** — the agent reads that JSON and decides whether there is a discernible
    **goal** and **request**. If there is none, **emit no card** (silence is a valid
@@ -97,14 +103,17 @@ emits one to-do-card JSON object.
 
 3. **Push** — pipe `{"card": <card>, "sessions": <fetch.sessions>, "tz": "<fetch.tz>"}`
    into `node scripts/brainstorming.js <userId> push` (a bare card object still
-   works — the card then just carries no dates). The script:
+   works, and still gets its dates). The script:
    - dedups against per-user local state (`data/users/<userId>.json` → `seen` map, 30-day TTL),
    - stamps the item's **optional** `start_at`/`end_at` journal window from the
      source session's `started_at`/`ended_at` (earliest session by `started_at`
      among the card's `source_refs`, that **same** session's `ended_at`),
      serialized as **naive LOCAL wall-clock** in the resolved tz — the
-     calendar-extractor convention. Missing/malformed session times ⇒ the fields
-     are omitted entirely (never invented),
+     calendar-extractor convention. The window is resolved from the session
+     windows `fetch` remembered (`sessionWindows` in the same state file), with
+     any piped `sessions` layered on top by `session_id`; when neither source
+     knows the card's `source_refs`, or the session times are
+     missing/malformed, the fields are omitted entirely (never invented),
    - validates + writes the **new** card to `POST /api/skill/data` with
      `type="todo"`, `merge="upsert"`, `status="pending"`, and
      `payload = { icon, title, subtitle?, prompt, source_refs[] }` (icon/title/prompt
@@ -194,8 +203,11 @@ also carries the **general** to-do card contract shared by all to-do-emitting sk
   `/api/skill/data` but cannot read it back (`GET /api/skill/data` requires a Clerk
   JWT), so novelty is decided by the local `seen` map (`{ "<dedup_key>": "<ts>" }` in
   `data/users/<userId>.json`, 30-day TTL-pruned); the server write is a best-effort
-  mirror. The to-do `dedup_key` is `title|hash(goal)` — re-brainstorming the same unit
-  toward a new goal is a genuinely new card.
+  mirror. The same file holds `sessionWindows`
+  (`{ "<session_id>": { started_at, ended_at?, seen_at } }`, raw instants, same TTL,
+  500-entry cap) — written by `fetch`, read by `push` for the journal window. The
+  to-do `dedup_key` is `title|hash(goal)` — re-brainstorming the same unit toward a
+  new goal is a genuinely new card.
 - **Timezone**: there is **no prefs file**. tz resolves in order: the `tz` field on the
   push/fetch payload → the `TZ` environment variable → the system zone. The resolved
   tz is used twice: for the relative-date anchor (so the agent resolves "today"

@@ -257,8 +257,8 @@ state; a report with no run behind it is a lie.
 
 ## The empty-batch rule
 
-If `items` is empty — a quiet mailbox, everything already handled, or the scope
-switched off in iOS — make **no `content` call and no `submit` call**. There is
+If `items` is empty — a quiet mailbox, or everything already handled — make
+**no `content` call and no `submit` call**. There is
 nothing to read and there are no verdicts to submit, and an empty submit would
 promote the cursor past a batch that was never offered.
 
@@ -372,7 +372,8 @@ they have the cards and the digest.
 |---|---|
 | `fetch` returns `{"error": "auth_missing"}` | Google is not connected. The server has already disabled the scope. Tell the user to connect Google in HiJavis, and stop. |
 | `fetch` returns `{"error": "needs_reconnect"}` | The Gmail read scope was not granted or was revoked. Tell the user to reconnect Google and re-grant read-only Gmail. Stop. |
-| `fetch` returns `ok` with an empty `items` | Nothing to do this run: the scope is off, or the mailbox is quiet. Do not submit; do `report` — the empty-batch rule. |
+| `fetch` returns `ok` with an empty `items` | Nothing to do this run: the mailbox is quiet. Do not submit; do `report` — the empty-batch rule. |
+| `fetch` returns `{"error": "disabled"}` | Gmail discovery is off — the user switched it off in HiJavis, or disconnected Google. **Stop silently**: no `content`, no `submit`, no `report`, and on a manual ask one line saying discovery is off. This is not a failure to diagnose; it is the user's switch. No run state was written, so a `report` would refuse with `no_recent_run` anyway. |
 | `fetch` returns a non-`ok` status | The call did not land, so no run state was written and `report` will refuse with `no_recent_run`. That is right: silence beats a digest with no run behind it. Say what the error was and stop. |
 | `content` returns `{"error": "no_staged_batch"}` | The server has no batch for this run — the `fetch` did not land, or too long has passed since it did. Do not re-run `fetch` to make one: that is a new batch and the keys you selected are from the old one. Judge the batch you have on metadata alone, say so in the `report` headline, and carry on to `submit`. |
 | `content` answers `unavailable: not_in_batch` | You asked for a key this run's `fetch` did not offer. Nothing was read. Judge that item on metadata if it is in the batch at all; if it is not, drop it — it was never yours to judge. |
@@ -380,6 +381,7 @@ they have the cards and the digest.
 | `content` returns `auth_missing` / `needs_reconnect` | Google access was lost mid-run, exactly as in `fetch`. Do not retry. Judge what you have on metadata, `submit`, `report`, and tell the user to reconnect Google in HiJavis. |
 | `content` errors any other way | Not fatal. You still have the metadata, which is what every run before this one judged on. Proceed to `submit` and cover the batch. |
 | One thread is missing fields | Judge it on what is there, or score it low. Never drop the whole batch for one bad item. |
+| `submit` returns `{"error": "disabled"}` | The user switched discovery off or disconnected Google while this run was in flight. The server wrote nothing from your verdicts. **Stop silently — do not `report`**: the run state still holds this run's `fetch` counters, so a `report` would push a digest to a user who has just turned this off. On a manual ask, one line saying discovery is off. |
 | `submit` errors or never returns | **Do not retry the run from `fetch`** — nothing is lost, the watermark is not promoted, and the same threads are offered next time. Re-scanning is always safe; a double submit is not. Then `report` anyway: the run state still holds what `fetch` found, so the digest renders the fetch counters alone and the user learns the run was attempted. |
 | `report` returns `no_recent_run` or `stale_run` | There is no run behind the digest — the `fetch` never landed, or this turn is picking up state from a run that died hours ago. Nothing is pushed, and that is right. Say what happened and stop; do not re-run `fetch` to make the refusal go away. |
 | A command or tool you need is absent | If `scripts/gmail-wiki-ingest.js` or `rubric.md` is missing, the bundle is broken — say so; do not improvise a rubric. If it is `gmail_search` / `gmail_get_message`, they are removed from this turn deliberately and stay removed: they read arbitrary mail, where `content` reads only this run's offered threads. Use `content`, or judge from the metadata. |
@@ -414,9 +416,11 @@ user finds their ingest waiting when they come back — which is when they want
 it.
 
 The user-facing on/off switch is `gmail_ingest_scopes.enabled`, the row iOS
-writes. The cron always fires; `fetch` returns an empty batch when the scope is
-off, and the empty-batch rule then applies — so a disabled user gets a
-one-line "nothing new" rather than a run they cannot see.
+writes and a Google disconnect clears. The cron always fires; `fetch` returns
+`{"error": "disabled"}` when the scope is off, and the run stops there without
+a digest. It used to return an ok, empty batch, and the empty-batch rule then
+pushed a "nothing new" line every day to a user who had disconnected Google —
+proof of life for a sync they had deliberately ended.
 
 ## References
 

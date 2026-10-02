@@ -137,12 +137,20 @@ time cannot use this pattern and needs a server-side sweep instead.
 
 ## The on/off switch
 
-`gmail_ingest_scopes.enabled`, the row iOS writes. The cron always fires;
-`fetch` returns an empty batch when the scope is off, and SKILL.md's
-empty-batch rule then applies — which, now that every run ends in a digest,
-means a disabled user gets a "nothing new" line rather than silence. That is
-the deliberate trade: proof of life is worth more than an absent message,
-because an absent message is exactly what a broken sync looks like.
+`gmail_ingest_scopes.enabled`, the row iOS writes and a Google disconnect
+clears. The cron always fires; `fetch` returns `{"error": "disabled"}` when the
+scope is off, and SKILL.md's Errors table stops the run there, silently, with
+no digest. (A `submit` that lands after a mid-run switch-off answers the same
+`disabled`, writes nothing, and the run stops the same way.)
+
+This reverses an earlier trade. `fetch` used to return an ok, empty batch for
+a disabled scope, so the empty-batch rule pushed "nothing new" daily — proof of
+life, on the theory that an absent message is what a broken sync looks like.
+For a user who switched the sync off or disconnected Google it was the
+opposite: a daily message about a feature they had ended. Proof of life still
+holds for every user whose scope is ON, which is the only case where silence
+could mean breakage. javis-server bug doc:
+docs/javis-dev/spec/2026-10-02-google-disconnect-leftovers-bug.md, #4b.
 
 ## Verifying it
 

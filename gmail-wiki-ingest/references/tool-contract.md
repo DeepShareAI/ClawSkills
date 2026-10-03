@@ -312,6 +312,7 @@ run or a re-submitted thread is a no-op, not a duplicate page.
 |---|---|---|
 | `GoogleAuthMissing` | `fetch` → `{error: "auth_missing"}`; the scope is disabled and its status set | report, stop |
 | `GmailScopeMissing` | `{error: "needs_reconnect"}`; the scope stays **enabled** so the GET endpoint can prompt re-consent | report, stop |
+| Scope off (discovery switched off, or Google disconnected) | `fetch` → `{error: "disabled"}`, nothing staged or written; also returned by a `fetch` or `submit` that was in flight when the switch-off landed, with that call's writes rolled back | stop silently — no `report` |
 | One thread's metadata fails | skipped and counted; the batch continues | judge the rest |
 | One thread's body read fails inside `content` | that key answers `unavailable: fetch_failed`; counted as `raised`, so the cursor holds | judge that item on metadata |
 | `content` key outside the staged batch | answers `unavailable: not_in_batch`; nothing is read | judge on metadata, or drop an item that was never offered |

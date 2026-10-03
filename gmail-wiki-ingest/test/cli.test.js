@@ -1109,6 +1109,19 @@ test('the blank title is documented as a rule, not left to be discovered', () =>
   assert.match(DOCS['references/tool-contract.md'], /de-slugifies its own slug/);
 });
 
+test('a disabled scope stops the run silently, at fetch and at submit', () => {
+  // javis-server answers `disabled` (not an ok, empty batch) when the scope is
+  // off, so a user who disconnected Google stops getting a daily "nothing new".
+  // Without these rows the generic non-ok row applies and the agent reports an
+  // error string instead; and a `submit` that answers `disabled` must not be
+  // followed by a `report`, which would render the fetch counters still in run
+  // state into a digest for a user who just turned this off.
+  const md = DOCS['SKILL.md'];
+  assert.match(md, /`fetch` returns `\{"error": "disabled"\}` \| [^\n]*Stop silently/);
+  assert.match(md, /`submit` returns `\{"error": "disabled"\}` \| [^\n]*do not `report`/);
+  assert.doesNotMatch(md, /returns an empty batch when the scope is\s+off/);
+});
+
 test('the rubric says which element of a node row the slug is', () => {
   // Position 0 is the page type — the one thing a citation must not carry — so
   // reading the wrong element yields a ref that looks plausible and validates

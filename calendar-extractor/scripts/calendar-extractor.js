@@ -10,8 +10,10 @@
  *   fetch  GET recent session transcripts from javis-server and print them as JSON
  *          to stdout. The agent reads this and extracts the calendar events.
  *          With --session <id> / --kbd-input <id> the payload is filtered to a
- *          single unit (the auto-run dispatcher unit); with no flags it returns the
- *          whole time window (the manual ask), unchanged.
+ *          single unit (the auto-run dispatcher unit); --session requests
+ *          /api/transcripts/recent?session_id=<id> (full transcript, not window-
+ *          trimmed). With no flags it returns the whole time window (the manual
+ *          ask), unchanged.
  *   push   read an extracted-events JSON array on stdin, dedup it against per-user
  *          local state (the `seen` map), mirror it to the server skill_data store
  *          tagged status:"pending" (best-effort), and push a markdown digest of the
@@ -52,7 +54,9 @@
  *                           the user's naive-local wall-clock and land cards a day off.
  *
  * Verified endpoints (javis-server):
- *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
+ *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit, and
+ *                                 session_id for `fetch --session`: that one session's
+ *                                 full transcript, since ignored by the server)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/agent/push          (get_gateway_user; {skill, content, session_id?})
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key) — used by
@@ -258,9 +262,17 @@ async function doFetch(opts = {}, deps = {}) {
   // --kbd-input resolves one keyboard row via the dedicated per-input endpoint
   // (the aggregated /transcripts/recent carries no keyboard_input.id). It already
   // returns exactly that unit, so no client-side filter is applied.
+  // --session (audio) asks the server for that one session via ?session_id=, which
+  // returns its full transcript regardless of the window (a session that started
+  // before --hours is no longer trimmed or missed). `since` stays on the URL: a
+  // server without session_id support ignores the unknown param and returns the
+  // --hours window, which filterToUnit below narrows to the same unit as before.
+  const since = encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString());
   const url = kbdFilter
     ? `${SERVER}/api/transcripts/keyboard-input/${encodeURIComponent(kbdFilter)}`
-    : `${SERVER}/api/transcripts/recent?since=${encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString())}&limit=${limit}`;
+    : sessionFilter
+      ? `${SERVER}/api/transcripts/recent?session_id=${encodeURIComponent(sessionFilter)}&since=${since}&limit=${limit}`
+      : `${SERVER}/api/transcripts/recent?since=${since}&limit=${limit}`;
 
   // A single-unit re-fetch can 404 when the source row was dropped after the
   // dispatcher scheduled this run (a keyboard_input insert rolled back, an id
@@ -292,7 +304,9 @@ async function doFetch(opts = {}, deps = {}) {
     ? (Array.isArray(data.sessions) ? data.sessions : [])
     : (Array.isArray(data) ? data : []);
 
-  // --session (audio) filters the recent window; --kbd-input is already one unit.
+  // --session (audio): the server already scopes to session_id, but filterToUnit
+  // stays so an older server (which ignores session_id) narrows the same way;
+  // --kbd-input is already one unit.
   if (!kbdFilter) sessions = filterToUnit(sessions, { sessionFilter });
 
   // tz order: payload tz (test override / server envelope) -> TZ env -> system.

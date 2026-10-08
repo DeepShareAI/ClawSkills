@@ -64,16 +64,22 @@ emits one to-do-card JSON object.
 
 1. **Fetch** — `node scripts/brainstorming.js <userId> fetch` issues
    `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
-   `OPENCLAW_GATEWAY_TOKEN` bearer and prints
+   `OPENCLAW_GATEWAY_TOKEN` bearer (`fetch --session <id>` instead requests
+   `/api/transcripts/recent?session_id=<id>&since=…&limit=…`, which returns that whole
+   session even if it started before the `--hours` window — `since`/`limit` only
+   matter to an older server that ignores `session_id`; `--kbd-input <id>` requests
+   `/api/transcripts/keyboard-input/<id>`) and prints
    `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript, source } ] }`.
    If fetch fails, returns invalid JSON, or yields zero sessions, output nothing and
    do not push; report the failure only if the user asked for a diagnostic.
    `fetch` also **remembers** each returned session's `started_at`/`ended_at` (raw
    instants) in `data/users/<userId>.json` → `sessionWindows`, pruned on the same
    30-day TTL as `seen` and capped at 500 entries, so step 3 can stamp the card's
-   journal window whether or not the sessions are piped back. It remembers EVERY
-   session the server returned, including the ones `--session`/`--kbd-input` filter
-   out of the envelope — the envelope still narrows to the unit you asked for.
+   journal window whether or not the sessions are piped back. It remembers every
+   session the server returned, including any that `--session`/`--kbd-input` filter
+   out of the envelope — the envelope still narrows to the unit you asked for. A
+   current server answers `--session <id>` with that one session only, so only its
+   window is remembered; cite sibling sessions only after a plain windowed `fetch`.
    The envelope's `tz` is remembered too, so a bare card is anchored in YOUR zone
    rather than the container's UTC.
 

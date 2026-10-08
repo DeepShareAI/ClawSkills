@@ -65,7 +65,10 @@ the **agent/LLM** does the reasoning (extract events). Extraction is not hardcod
 reads the fetched transcripts and emits a JSON array of events.
 
 1. **Fetch** — `node scripts/calendar-extractor.js <userId> fetch` issues
-   `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` with the
+   `GET http://javis-server:8000/api/transcripts/recent?since=…&limit=…` (with
+   `fetch --session <id>`: `?session_id=<id>&since=…&limit=…`, which returns that one
+   session's full transcript regardless of `--hours`; the script still narrows the
+   result to that unit, so an older server that ignores `session_id` behaves as before) with the
    `OPENCLAW_GATEWAY_TOKEN` bearer and prints
    `{ "reference_time": LOCAL-wall-clock (zoneless, in tz), "reference_date": "YYYY-MM-DD", "reference_weekday": "Thursday", "reference_time_utc": ISO8601, "tz": IANA, "sessions": [ { session_id, started_at, ended_at, transcript } ] }`. If fetch fails, returns invalid JSON, or yields zero sessions, output an empty events array and do not push anything; report the failure only if the user asked for a diagnostic. If the fetch response contains no sessions or the transcript text is empty, return `[]` and do not attempt to push a digest. **Exception — the dispatcher path with a `UNIT CONTEXT` block (see "How this skill is invoked"): a failed single-unit `fetch --session`/`fetch --kbd-input` (empty/404, surfaced as `fetch_error` in the envelope) does NOT mean "emit nothing" — fall back to the prompt-embedded transcript/reference_date/tz and STILL extract and push.** (The `fetch` here degrades to an empty-sessions envelope rather than aborting, so the run continues.)
 2. **Extract** — the agent reads that JSON and produces an events array. Each event:
@@ -237,7 +240,8 @@ skill-level `risk`, plus the run prompt shape) is declared in this file's
 - **Runtime dependencies** — the extractor script uses Node 18+ built-ins only (`fetch`, `fs`, `path`); no `npm install` is needed for the script runtime.
 - **Data sources**: audio recording transcripts **and** keyboard-dictation sessions — both via
   `GET /api/transcripts/recent` (gateway-token authed), each session carrying a `source` field
-  (`"audio"` | `"keyboard"`); a single keyboard unit resolves via
+  (`"audio"` | `"keyboard"`); a single audio unit (`fetch --session <id>`) adds
+  `session_id=<id>`; a single keyboard unit resolves via
   `GET /api/transcripts/keyboard-input/<id>`. Plus per-user local state (dedup memory). There is no
   `HTTP_SOURCE_URL` — the script talks to javis-server directly.
 - **Events are written PENDING.** Every event mirrored to `/api/skill/data` carries

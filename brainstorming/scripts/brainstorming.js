@@ -50,7 +50,8 @@
  *   TZ                      optional — IANA zone for the relative-date anchor
  *
  * Verified endpoints (javis-server):
- *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit)
+ *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit; --session
+ *                                  sends session_id=<id> instead → whole session)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key; type=todo)
  *   POST /api/agent/push          (get_gateway_user; {skill, content, dedup_key})  — chat digest
@@ -225,9 +226,19 @@ async function doFetch(opts = {}, deps = {}) {
   const hours = 'hours' in opts ? opts.hours : (parseInt(getFlag('hours', '24'), 10) || 24);
   const limit = 'limit' in opts ? opts.limit : (parseInt(getFlag('limit', '50'), 10) || 50);
 
+  // --session asks the server for that one session by id (whole transcript,
+  // `since` ignored server-side), so a unit that started before the --hours
+  // window is still returned in full. `since` and `limit` stay on the URL: a
+  // server without session_id support ignores the unknown param and returns
+  // the --hours/--limit window (not its own 24h/50 defaults), which
+  // filterToUnit below narrows to the same unit the old skill found.
+  // --kbd-input and the plain window keep their URLs.
+  const since = encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString());
   const url = kbdFilter
     ? `${SERVER}/api/transcripts/keyboard-input/${encodeURIComponent(kbdFilter)}`
-    : `${SERVER}/api/transcripts/recent?since=${encodeURIComponent(new Date(Date.now() - hours * 3600 * 1000).toISOString())}&limit=${limit}`;
+    : sessionFilter
+      ? `${SERVER}/api/transcripts/recent?session_id=${encodeURIComponent(sessionFilter)}&since=${since}&limit=${limit}`
+      : `${SERVER}/api/transcripts/recent?since=${since}&limit=${limit}`;
   const data = await httpGet(url, token);
 
   const isEnvelope = data && typeof data === 'object' && !Array.isArray(data);
@@ -242,9 +253,14 @@ async function doFetch(opts = {}, deps = {}) {
   const payloadTz = 'tz' in opts ? opts.tz : (deps.tz != null ? deps.tz : base.tz);
   const tz = resolveTz(payloadTz);
 
-  // Remember EVERY session this fetch returned, not just the one --session
-  // narrowed the envelope to. The window costs nothing to keep, and a card whose
-  // source_refs cite a sibling session from the same fetch still gets its day.
+  // Remember every session this fetch returned, not just the one --session
+  // narrowed the envelope to. What that covers depends on the server: a server
+  // with session_id support returns ONLY the requested session (R5/R11), so a
+  // --session fetch remembers just that one window; an older server returns the
+  // whole --hours window, so its siblings are remembered too. The windowed fetch
+  // and --kbd-input remember everything they got. A card citing a session no
+  // fetch has returned simply gets no start_at/end_at from this map (the
+  // piped-sessions path and the agent's own windowed fetches still supply it).
   //
   // Remembering is NON-FATAL: an unwritable state file must never cost the agent
   // the envelope it is waiting on (the card then degrades to the piped-sessions

@@ -132,6 +132,157 @@ test('doFetch with no filter returns the whole window unchanged (manual path)', 
   assert.equal(emitted.sessions.length, 2);
 });
 
+// ---- fetch URLs (transcripts-recent-audio-aggregation design 2026-10-07) ----
+//   R7  fetch --session requests /api/transcripts/recent?session_id=<id>&since&limit
+//       (the server returns the WHOLE session, ignoring since; an old server
+//       uses since/limit as before) and still narrows
+//       client-side with filterToUnit
+//   R13 the windowed fetch and --kbd-input request the same URLs as before
+//   R14 against an old server that ignores session_id (full window payload),
+//       the new skill emits exactly what the old skill emitted
+const OLD_SERVER_WINDOW = {
+  tz: TZ,
+  sessions: [
+    { session_id: 'aud-0', source: 'audio', started_at: '2026-06-03T09:00:00.000Z', ended_at: '2026-06-03T09:10:00.000Z', transcript: 'other' },
+    { session_id: 'aud-1', source: 'audio', started_at: '2026-06-03T10:00:00.000Z', ended_at: '2026-06-03T10:30:00.000Z', transcript: 'target' },
+    { session_id: '2026-06-03', source: 'keyboard', started_at: '2026-06-03T11:00:00.000Z', ended_at: '2026-06-03T11:05:00.000Z', transcript: 'typed' },
+  ],
+};
+
+test('R7 TC-S3-2: doFetch --session requests ?session_id=<id> and keeps the since/limit fallback window', async () => {
+  let calledUrl;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud 1/x', kbdFilter: null, hours: 1, limit: 50, tz: TZ },
+    { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {}, ...makeStore() }
+  );
+  assert.match(calledUrl, /\/api\/transcripts\/recent\?session_id=aud%201%2Fx&since=[^&]+&limit=50$/);
+});
+
+// R14: an old server ignores session_id and serves the since/limit window. With
+// non-default --hours/--limit (unlike the server's 24h/50 defaults) the new
+// --session URL must carry the SAME since/limit the old skill sent, or a session
+// that started 30h ago under `--hours 72` would drop out of the old server's reply.
+test('R14 TC-S4-2: --session with non-default --hours/--limit sends the same since/limit as the old skill', async (t) => {
+  const oldMod = loadMainScript();
+  if (!oldMod) { t.skip('git main not available'); return; }
+  const capture = async (fetchFn) => {
+    let calledUrl;
+    await fetchFn(
+      { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 72, limit: 7, tz: TZ },
+      { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {}, ...makeStore() }
+    );
+    return new URL(calledUrl).searchParams;
+  };
+  const neu = await capture(doFetch);
+  const old = await capture(oldMod.doFetch);
+  assert.equal(neu.get('session_id'), 'aud-1');
+  assert.equal(neu.get('limit'), '7');
+  assert.equal(neu.get('limit'), old.get('limit'));
+  const sinceNew = Date.parse(neu.get('since'));
+  const sinceOld = Date.parse(old.get('since'));
+  assert.ok(Math.abs(sinceNew - sinceOld) < 5000, 'since matches the old skill (both now-72h)');
+  assert.ok(Math.abs(Date.now() - 72 * 3600 * 1000 - sinceNew) < 5000);
+});
+
+test('R13 TC-S3-3: windowed fetch URL is unchanged (since + limit, no session_id)', async () => {
+  let calledUrl;
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {}, ...makeStore() }
+  );
+  assert.match(calledUrl, /\/api\/transcripts\/recent\?since=[^&]+&limit=50$/);
+  assert.doesNotMatch(calledUrl, /session_id=/);
+});
+
+test('R13 TC-S3-3: --kbd-input URL is unchanged even when --session is also set', async () => {
+  let calledUrl;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud-1', kbdFilter: '4217', hours: 24, limit: 50, tz: TZ },
+    { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {}, ...makeStore() }
+  );
+  assert.match(calledUrl, /\/api\/transcripts\/keyboard-input\/4217$/);
+  assert.doesNotMatch(calledUrl, /session_id=/);
+});
+
+test('R7 TC-S3-4: --session still applies filterToUnit to the payload', async () => {
+  let emitted;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    {
+      httpGet: async () => ({ sessions: [
+        { session_id: 'aud-1', source: 'audio', transcript: 'A' },
+        { session_id: 'aud-2', source: 'audio', transcript: 'B' },
+      ] }),
+      now: NOW, emit: (o) => { emitted = o; }, ...makeStore(),
+    }
+  );
+  assert.deepEqual(emitted.sessions.map((s) => s.session_id), ['aud-1']);
+});
+
+// R5/R11: a session_id-aware server answers --session with ONLY that session,
+// so fetch remembers only that window (siblings are remembered only when the
+// server sends them: an old server's full window, or a plain windowed fetch).
+test('R7 TC-S3-4: --session against a new server remembers only the requested session window', async () => {
+  const store = makeStore({ userId: 'self' });
+  await doFetch(
+    { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    {
+      httpGet: async () => ({ tz: TZ, sessions: [JSON.parse(JSON.stringify(OLD_SERVER_WINDOW.sessions[1]))] }),
+      now: NOW, emit: () => {}, ...store,
+    }
+  );
+  assert.deepEqual(Object.keys(store.box.state.sessionWindows), ['aud-1']);
+  assert.equal(store.box.state.sessionWindows['aud-1'].started_at, '2026-06-03T10:00:00.000Z');
+});
+
+test('R14: --session against an old server (full window) still remembers the sibling windows', async () => {
+  const store = makeStore({ userId: 'self' });
+  let emitted;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    { httpGet: async () => JSON.parse(JSON.stringify(OLD_SERVER_WINDOW)), now: NOW, emit: (o) => { emitted = o; }, ...store }
+  );
+  assert.deepEqual(emitted.sessions.map((s) => s.session_id), ['aud-1']);
+  assert.deepEqual(Object.keys(store.box.state.sessionWindows).sort(), ['2026-06-03', 'aud-0', 'aud-1']);
+});
+
+// Load the pre-change script from git main (if available) as a module resolved
+// next to the current script, so its ./data, ./lib requires still resolve.
+function loadMainScript() {
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  const Module = require('module');
+  let src;
+  try {
+    src = execFileSync('git', ['show', 'main:brainstorming/scripts/brainstorming.js'],
+      { cwd: path.join(__dirname, '..'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (_e) { return null; }
+  const filename = path.join(__dirname, '..', 'scripts', '__main_brainstorming__.js');
+  const m = new Module(filename, module);
+  m.filename = filename;
+  m.paths = Module._nodeModulePaths(path.dirname(filename));
+  m._compile(src, filename);
+  return m.exports;
+}
+
+test('R14 TC-S4-2: on an old-server payload (session_id ignored) the new skill emits what the old skill emitted', async (t) => {
+  const oldMod = loadMainScript();
+  if (!oldMod) { t.skip('git main not available'); return; }
+  const run = async (fetchFn) => {
+    let emitted;
+    const store = makeStore();
+    await fetchFn(
+      { token: 't', sessionFilter: 'aud-1', kbdFilter: null, hours: 24, limit: 50 },
+      { httpGet: async () => JSON.parse(JSON.stringify(OLD_SERVER_WINDOW)), now: NOW, emit: (o) => { emitted = o; }, ...store }
+    );
+    return { emitted, state: store.box.state };
+  };
+  const neu = await run(doFetch);
+  const old = await run(oldMod.doFetch);
+  assert.deepEqual(neu, old);
+  assert.deepEqual(neu.emitted.sessions.map((s) => s.session_id), ['aud-1']);
+});
+
 // ---- normalizeCard: compose the prompt + defaults ------------------------
 test('normalizeCard composes the prompt and fills icon/subtitle/dedupKey defaults', () => {
   const card = normalizeCard(SAMPLE_CARD);

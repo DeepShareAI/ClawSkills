@@ -406,3 +406,144 @@ test('doPush with an empty events array pushes nothing (empty-fetch path)', asyn
   assert.equal(client.calls.mirror.length, 0, 'no table write for empty input');
   assert.equal(client.calls.push.length, 0, 'no digest pushed for empty input');
 });
+
+// ---- fetch URLs: ?session_id= for --session (R7/R13/R14/R15) ---------------
+// Spec: javis.is/docs/superpowers/specs/2026-10-07-transcripts-recent-audio-aggregation-design.md
+//   - R7  fetch --session <id> requests /transcripts/recent?session_id=<id>, filterToUnit kept
+//   - R13 the windowed (no filter) and --kbd-input URLs are byte-identical to before
+//   - R14 an old server ignores session_id; the emitted output matches the old skill
+const SERVER_BASE = process.env.JAVIS_SERVER_URL || 'http://javis-server:8000';
+
+// TC-S3-1 (R7)
+test('R7 TC-S3-1: doFetch --session requests /transcripts/recent?session_id=<id>', async () => {
+  let calledUrl;
+  await doFetch(
+    { token: 't', sessionFilter: 'aud 1/x', kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+    { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {} }
+  );
+  assert.ok(calledUrl.startsWith(`${SERVER_BASE}/api/transcripts/recent?`), calledUrl);
+  const q = new URL(calledUrl).searchParams;
+  assert.equal(q.get('session_id'), 'aud 1/x', 'session_id carries the --session id');
+  assert.ok(calledUrl.includes(`session_id=${encodeURIComponent('aud 1/x')}`), 'id is URL-encoded');
+  assert.equal(q.get('limit'), '50');
+  // since stays on the URL so an old server (no session_id support, R14) still
+  // returns the --hours window that filterToUnit then narrows.
+  assert.ok(q.get('since'), 'since kept for old-server compat');
+});
+
+// TC-S3-3 (R13)
+test('R13 TC-S3-3: windowed fetch URL is unchanged (since + limit, no session_id)', async () => {
+  let calledUrl;
+  const realNow = Date.now;
+  Date.now = () => Date.parse('2026-06-03T12:00:00.000Z');
+  try {
+    await doFetch(
+      { token: 't', sessionFilter: null, kbdFilter: null, hours: 24, limit: 50, tz: TZ },
+      { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {} }
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(
+    calledUrl,
+    `${SERVER_BASE}/api/transcripts/recent?since=${encodeURIComponent('2026-06-02T12:00:00.000Z')}&limit=50`
+  );
+  assert.doesNotMatch(calledUrl, /session_id/);
+});
+
+// TC-S3-3 (R13)
+test('R13 TC-S3-3: --kbd-input URL is unchanged (keyboard-input/<id>)', async () => {
+  let calledUrl;
+  await doFetch(
+    { token: 't', sessionFilter: null, kbdFilter: '4217', hours: 24, limit: 50, tz: TZ },
+    { httpGet: async (url) => { calledUrl = url; return { sessions: [] }; }, now: NOW, emit: () => {} }
+  );
+  assert.equal(calledUrl, `${SERVER_BASE}/api/transcripts/keyboard-input/4217`);
+});
+
+// TC-S3-4 (R7): filterToUnit still narrows a multi-session payload.
+test('R7 TC-S3-4: --session still narrows a 2-session payload via filterToUnit', async () => {
+  const payload = {
+    tz: TZ,
+    sessions: [
+      { session_id: 'target', source: 'audio', transcript: 'T' },
+      { session_id: 'other', source: 'audio', transcript: 'O' },
+    ],
+  };
+  let emitted;
+  await doFetch(
+    { token: 't', sessionFilter: 'target', kbdFilter: null, hours: 24, limit: 50 },
+    { httpGet: async () => payload, now: NOW, emit: (o) => { emitted = o; } }
+  );
+  assert.deepEqual(emitted.sessions, [{ session_id: 'target', source: 'audio', transcript: 'T' }]);
+});
+
+// TC-S4-2 (R14): an old server ignores session_id and returns the whole window.
+const OLD_SERVER_PAYLOAD = {
+  tz: TZ,
+  sessions: [
+    { session_id: 'other-1', source: 'audio', started_at: 1, ended_at: 2, transcript: 'O1' },
+    { session_id: 'target', source: 'audio', started_at: 3, ended_at: 4, transcript: 'T' },
+    { session_id: 'other-2', source: 'keyboard', started_at: 5, ended_at: 6, transcript: 'O2' },
+  ],
+};
+
+async function runFetch(mod) {
+  let emitted;
+  await mod.doFetch(
+    { token: 't', sessionFilter: 'target', kbdFilter: null, hours: 24, limit: 50 },
+    {
+      // Old server: session_id is an unknown query param and is ignored.
+      httpGet: async () => JSON.parse(JSON.stringify(OLD_SERVER_PAYLOAD)),
+      now: NOW,
+      emit: (o) => { emitted = o; },
+    }
+  );
+  return emitted;
+}
+
+test('R14 TC-S4-2: new skill on an old-server payload emits the pre-change output', async () => {
+  const emitted = await runFetch({ doFetch });
+  assert.deepEqual(emitted, {
+    reference_time: '2026-06-03T05:00:00',
+    reference_date: '2026-06-03',
+    reference_weekday: 'Wednesday',
+    reference_time_utc: NOW(),
+    tz: TZ,
+    sessions: [{ session_id: 'target', source: 'audio', started_at: 3, ended_at: 4, transcript: 'T' }],
+  });
+});
+
+test('R14 TC-S4-2: new skill and main-branch skill emit deep-equal output on an old-server payload', async (t) => {
+  // Load the pre-change script from `main` (skipped where git/main is unavailable,
+  // e.g. an installed skill bundle). Its relative requires are pointed at this
+  // checkout's data.js / lib.js, which this change does not touch.
+  const { execFileSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  let src;
+  try {
+    src = execFileSync('git', ['show', 'main:calendar-extractor/scripts/calendar-extractor.js'], {
+      cwd: path.join(__dirname, '..'),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString();
+  } catch {
+    t.skip('git main:calendar-extractor.js not available');
+    return;
+  }
+  const scriptsDir = path.join(__dirname, '..', 'scripts');
+  src = src
+    .replace("require('./data')", `require(${JSON.stringify(path.join(scriptsDir, 'data'))})`)
+    .replace("require('./lib')", `require(${JSON.stringify(path.join(scriptsDir, 'lib'))})`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cal-ext-main-'));
+  const oldPath = path.join(dir, 'calendar-extractor.js');
+  fs.writeFileSync(oldPath, src);
+  try {
+    const oldMod = require(oldPath);
+    const [oldOut, newOut] = [await runFetch(oldMod), await runFetch({ doFetch })];
+    assert.deepEqual(newOut, oldOut);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -51,7 +51,7 @@
  *
  * Verified endpoints (javis-server):
  *   GET  /api/transcripts/recent  (get_gateway_user; params since, limit; --session
- *                                  sends session_id=<id> instead → whole session)
+ *                                  adds session_id=<id> → whole session; since/limit stay for old servers)
  *   GET  /api/transcripts/keyboard-input/<id>  (get_gateway_user; one keyboard row)
  *   POST /api/skill/data          (get_gateway_user; upsert by dedup_key; type=todo)
  *   POST /api/agent/push          (get_gateway_user; {skill, content, dedup_key})  — chat digest

@@ -252,7 +252,7 @@ async function doFetch(opts = {}, deps = {}) {
   const nowIso = deps.now ? deps.now() : new Date().toISOString();
 
   // --session (audio) / --kbd-input (keyboard) target one unit for the auto-run
-  // dispatcher unit; a unit outside the default window widens --hours as needed.
+  // dispatcher unit; --session asks for that unit whole via ?session_id=, whatever --hours is.
   // Tests inject opts.* directly; the CLI leaves them undefined and we read argv.
   const sessionFilter = 'sessionFilter' in opts ? opts.sessionFilter : getFlag('session', null);
   const kbdFilter = 'kbdFilter' in opts ? opts.kbdFilter : getFlag('kbd-input', null);

@@ -366,6 +366,29 @@ a **manual ask**, one line is enough — how many were reviewed, how many queued
 for Confirm, how many auto-ingested. Never list the subjects back to the user;
 they have the cards and the digest.
 
+## On-demand runs always reply
+
+This rule covers **on-demand runs**: the user asked in chat ("ingest my email",
+"gmail ingest", "sync my inbox to the wiki", "整理邮件", "邮件入库"), including a
+starter tapped in HiJavis Agent Chat, which sends this skill's slash command
+(`/gmail-wiki-ingest ingest my email`). An on-demand run **ALWAYS ends with a chat
+reply** of your own in that conversation, in the user's language — on top of the
+`report` digest, and also when the run finds nothing or stops early:
+
+- **Busy run:** the one line from "After `submit`" above.
+- **Nothing new** (empty `items`, after the `report` the empty-batch rule calls for):
+  say so and what happens next, e.g. "Nothing new in your inbox since the last run —
+  I'll check again tomorrow."
+- **Stopped early** (every "stop" row in "Errors" below — `auth_missing`,
+  `needs_reconnect`, `disabled`, a non-`ok` fetch, `no_recent_run` / `stale_run`):
+  one line saying what happened and what to do next — connect or reconnect Google in
+  HiJavis, turn Gmail discovery back on, or try again later.
+
+Never end an on-demand run with an empty message or raw JSON. This rule does **not**
+change the scheduled run: the daily cron turn still outputs nothing as its own final
+text and still stops silently on `disabled`. This skill has no dispatcher path (see
+"When to act").
+
 ## Errors
 
 | Condition | What you do |

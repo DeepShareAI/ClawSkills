@@ -17,6 +17,7 @@ dist/
 calendar-extractor/data/
 brainstorming/data/
 gmail-wiki-ingest/data/
+todo-spend-tracker/data/
 
 # Local design/plan notes (kept out of the published skill bundle).
 calendar-extractor/docs/

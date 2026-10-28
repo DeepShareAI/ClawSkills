@@ -1,5 +1,5 @@
 ---
-name: todo-spend-tracker
+name: javis-todo-spend-tracker
 description: Keep the user's to-do list and spending ledger from what they say out loud. The javis-server dispatcher runs this skill once for every completed recording or keyboard unit; the skill reads the open to-dos, extracts the user's own to-dos, purchases and "done" statements, and writes them as PENDING cards the user confirms or discards. In chat it answers "what's on my list" and "what did I spend this month" by running its counting script. Triggers — "what's on my list", "my to-dos", "what did I spend this month", "spending this month", "待办", "这个月花了多少".
 keywords: to-do, todo list, spending, expenses, what did I spend, 待办, 花了多少, todo-spend-tracker
 metadata:
@@ -8,7 +8,7 @@ metadata:
       node: ">=18"
   routes:
     - route_id: ledger
-      skill: todo-spend-tracker
+      skill: javis-todo-spend-tracker
       matches: "to-dos the user commits to, purchases and money the user spent, a to-do the user says is done"
       args_template: null
       risk: low
@@ -27,7 +27,7 @@ deleted) in the HiJavis app. Only confirmed rows count.
 ## When to run
 
 1. **Dispatcher run (automatic).** After a recording or keyboard unit completes, the
-   server runs this skill with a prompt like `Run /todo-spend-tracker for <unit>.` (the
+   server runs this skill with a prompt like `Run /javis-todo-spend-tracker for <unit>.` (the
    unit is `audio:<id>` or `kbd:<id>`) plus a `UNIT CONTEXT` block (`transcript`, `reference_date`, `tz`, `source_ref`,
    `source_kind`). Do the extraction below. If the unit holds nothing to record, do
    nothing: no push, no reply.

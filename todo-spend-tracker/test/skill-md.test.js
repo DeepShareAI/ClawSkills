@@ -13,9 +13,31 @@ const md = fs.readFileSync(path.join(DIR, 'SKILL.md'), 'utf8');
 const front = md.match(/^---\n([\s\S]*?)\n---/)[1];
 
 test('SKILL.md [R6, TC-S0-3]: front matter declares the low-risk ledger route', () => {
-  assert.match(front, /^name: todo-spend-tracker$/m);
-  assert.match(front, /- route_id: ledger\n\s+skill: todo-spend-tracker\n/);
+  assert.match(front, /- route_id: ledger\n/);
   assert.match(front, /risk: low/);
+});
+
+test('SKILL.md [R1]: name and every route skill are the ClawHub listing name javis-todo-spend-tracker', () => {
+  assert.match(front, /^name: javis-todo-spend-tracker$/m);
+  // Also matches a route whose first key is skill (`- skill: x`).
+  const skills = [...front.matchAll(/^\s+(?:-\s+)?skill:\s*(\S+)\s*$/gm)].map((m) => m[1]);
+  assert.ok(skills.length >= 1, 'at least one metadata.routes[].skill');
+  assert.deepEqual(skills.filter((s) => s !== 'javis-todo-spend-tracker'), []);
+  // The dispatcher prompt names the installed skill (Run /<slug>), not the data label.
+  assert.ok(md.includes('Run /javis-todo-spend-tracker for <unit>.'));
+  assert.doesNotMatch(md, /Run \/todo-spend-tracker\b/);
+});
+
+test('package.json [R1]: name javis-todo-spend-tracker, version 0.1.1', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(DIR, 'package.json'), 'utf8'));
+  assert.equal(pkg.name, 'javis-todo-spend-tracker');
+  assert.equal(pkg.version, '0.1.1');
+});
+
+test('data label [R3]: lib.js SLUG and the skill_data label stay todo-spend-tracker', () => {
+  const { SLUG } = require('../scripts/lib');
+  assert.equal(SLUG, 'todo-spend-tracker');
+  assert.ok(md.includes('`skill_data` (`skill=todo-spend-tracker`)'));
 });
 
 test('SKILL.md [R9]: lists the 9 categories exactly, in order', () => {
@@ -52,9 +74,14 @@ test('SKILL.md [R0-5, R0-4, R0-2]: documents the unit field, the date window and
   assert.doesNotMatch(md, /data\/users/);
 });
 
-test('repo [R6]: todo-spend-tracker is in hijavis-skills.json', () => {
+// iOS reads this allowlist live from main with no owner check, so the new
+// name is added only after ClawHub serves javis-todo-spend-tracker from
+// samuel-wei (spec R2/R4, a follow-up one-line PR). The old name resolves to
+// gmail-wiki-ingest on ClawHub, so it is dropped now.
+test('repo [R2, R13]: hijavis-skills.json lists neither name until the listing is live', () => {
   const list = JSON.parse(fs.readFileSync(path.join(DIR, '..', 'hijavis-skills.json'), 'utf8'));
-  assert.ok(list.skills.includes('todo-spend-tracker'));
+  assert.ok(!list.skills.includes('todo-spend-tracker'));
+  assert.ok(!list.skills.includes('javis-todo-spend-tracker'));
 });
 
 test('repo: starters.json passes the shared validator', () => {

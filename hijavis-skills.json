@@ -1,8 +1,47 @@
 {
-  "version": 2,
+  "version": 3,
   "skills": [
     "calendar-extractor",
     "gmail-wiki-ingest",
+    "javis-todo-spend-tracker",
     "javis-brainstorming"
+  ],
+  "catalog": [
+    {
+      "slug": "calendar-extractor",
+      "folder": "calendar-extractor",
+      "default": true,
+      "display_name": "Calendar Extractor",
+      "summary": "Finds the meetings and events in your recordings and typed notes and adds them to your calendar for you to confirm.",
+      "creator": "samuel-wei",
+      "license": "MIT-0"
+    },
+    {
+      "slug": "gmail-wiki-ingest",
+      "folder": "gmail-wiki-ingest",
+      "default": true,
+      "display_name": "Gmail Wiki Ingest",
+      "summary": "Sorts each day's email against your personal wiki and keeps the threads worth remembering.",
+      "creator": "samuel-wei",
+      "license": "MIT-0"
+    },
+    {
+      "slug": "javis-todo-spend-tracker",
+      "folder": "todo-spend-tracker",
+      "default": true,
+      "display_name": "Todo Spend Tracker",
+      "summary": "Keeps your to-do list and spending ledger from what you say out loud.",
+      "creator": "samuel-wei",
+      "license": "MIT-0"
+    },
+    {
+      "slug": "javis-brainstorming",
+      "folder": "brainstorming",
+      "default": false,
+      "display_name": "Brainstorming",
+      "summary": "Turns an idea you talked through into a to-do card with a ready-to-paste brainstorming prompt.",
+      "creator": "samuel-wei",
+      "license": "MIT-0"
+    }
   ]
 }

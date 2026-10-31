@@ -4,7 +4,8 @@
     "calendar-extractor",
     "gmail-wiki-ingest",
     "javis-todo-spend-tracker",
-    "javis-brainstorming"
+    "javis-brainstorming",
+    "notebooklm-ingest"
   ],
   "catalog": [
     {
@@ -40,6 +41,15 @@
       "default": false,
       "display_name": "Brainstorming",
       "summary": "Turns an idea you talked through into a to-do card with a ready-to-paste brainstorming prompt.",
+      "creator": "samuel-wei",
+      "license": "MIT-0"
+    },
+    {
+      "slug": "notebooklm-ingest",
+      "folder": "notebooklm-ingest",
+      "default": false,
+      "display_name": "NotebookLM Ingest",
+      "summary": "Brings notes, reports and study guides from the NotebookLM notebooks you choose into your Javis wiki, on a schedule you set.",
       "creator": "samuel-wei",
       "license": "MIT-0"
     }

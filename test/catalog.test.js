@@ -77,6 +77,7 @@ test('catalog [R3, TC-S0-2]: ships the agreed skills, defaults, creator and lice
       ['gmail-wiki-ingest', 'gmail-wiki-ingest', true],
       ['javis-todo-spend-tracker', 'todo-spend-tracker', true],
       ['javis-brainstorming', 'brainstorming', false],
+    ['notebooklm-ingest', 'notebooklm-ingest', false],
     ],
   );
   for (const e of CATALOG.catalog) {

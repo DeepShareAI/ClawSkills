@@ -52,6 +52,19 @@ and checks what it produces:
   broker never to follow instructions in either, and the checks above hold even
   when it does.
 
+## Handed-over tasks (0.2.0)
+
+When the agent holds a to-do or spending item the user handed over in HiJavis,
+javis-server adds a `HANDED-OVER TASK` block (the task, the user's item and a
+consent line) to the request and puts the item first in the slice. The broker
+then shares only the facts the item needs, one per point, each with `sources`
+and a short `label` (80 characters or fewer, for example "Launch date: Fri Nov
+21"). javis-server stores the labels as the task's shared-facts record and adds
+the closing "Nothing else was shared." line itself, so the broker never writes
+it. Conversations, voice memos and Gmail still go to the user's approval card.
+Requests without the block are handled exactly as in 0.1.x, and the server
+ignores `label` on them.
+
 `references/submit-answer.schema.json` mirrors the static part of the answer
 check. `references/examples/` holds valid and invalid submissions.
 `references/schema-lite.js` is the dependency-free validator the tests use.

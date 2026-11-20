@@ -335,9 +335,9 @@ test('TC_S5_2 broker skill: every point answers the question for the stated task
   assert.match(s4, /Do not add a point from another item just because it is\s+related/);
 });
 
-test('fix1 broker skill: package version is 0.2.1 (hand-over item questions, no empty answers)', () => {
+test('fix5 broker skill: package version is 0.2.2 (approval card shows labels)', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(SKILL_DIR, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.2.1');
+  assert.equal(pkg.version, '0.2.2');
 });
 
 test('repair2 broker skill: a pending to-do is neither open nor closed', () => {
@@ -474,10 +474,44 @@ test('R6 broker skill: README states the hand-over rule', () => {
   assert.match(readme, /Nothing else was shared\./);
 });
 
-test('F11 broker skill: a label only names what its point says; Javis drops labels the approval card does not show', () => {
+test('F11 broker skill: a label only names what its point says; Javis drops the label of a point citing an excerpt', () => {
   const h = handoverSection();
   assert.match(h, /never put anything in a\s+label that is not in that text/);
-  assert.match(h, /Javis drops the label of a point that cites\s+a conversation or voice memo/);
+  assert.match(h, /Javis drops the label of any point that cites an excerpt \(conversation or voice-memo words\)/);
+});
+
+// fix5 (TC-S2-3, user decision 2026-11-20 "Show labels on the card"): the
+// approval card shows each point's label next to its text, so approving the
+// card approves the label; the old "every label of an approval-card answer is
+// dropped" rule is gone.
+test('fix5 TC_S2_3 broker skill: labels of an approval-card answer are shown on the card, not dropped', () => {
+  const h = handoverSection().replace(/\s+/g, ' ');
+  assert.match(h, /the card shows each point's label next to its text, and Javis keeps a label only if the user's app showed it and the user approved/);
+  assert.match(h, /An exact \(verbatim\) answer carries no labels\./);
+  assert.doesNotMatch(h, /every label of an answer that goes to the user's approval card/);
+  assert.doesNotMatch(h, /the card shows each point's text, not its label/);
+});
+
+test('fix5 broker skill: README 0.2.2 notes state the card shows labels and excerpt labels are still dropped', () => {
+  const readme = fs.readFileSync(path.join(SKILL_DIR, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  const start = readme.indexOf('## 0.2.2');
+  const end = readme.indexOf('## Iterating');
+  assert.ok(start >= 0 && end > start, '0.2.2 notes sit before Iterating');
+  const notes = readme.slice(start, end);
+  assert.match(notes, /0\.2\.2/);
+  assert.match(notes, /A label only names what its point's text says\./);
+  assert.match(notes, /drops the label of any point that cites an excerpt \(conversation or voice-memo words\)/);
+  assert.match(notes, /shown on the card next to each point's text/);
+  assert.match(notes, /keeps a label on the task's shared-facts record only if the user's app showed it and the user approved/);
+  assert.match(notes, /An exact \(verbatim\) answer carries no labels\./);
+  assert.doesNotMatch(notes, /submit-answer\.schema\.json/);
+});
+
+test('fix5 broker skill: the general schema paragraph stays after the 0.2.1 notes and outside the 0.2.2 notes', () => {
+  const readme = fs.readFileSync(path.join(SKILL_DIR, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  const para = readme.indexOf('`references/submit-answer.schema.json` mirrors the static part of the answer check.');
+  assert.ok(para > readme.indexOf('## 0.2.1'), 'paragraph follows the 0.2.1 notes');
+  assert.ok(para < readme.indexOf('## 0.2.2'), 'paragraph precedes the 0.2.2 notes');
 });
 
 // fix1 (TC-S1-21, TC-S4-4), repair pass contract C2 + C4(e). The hand-over
@@ -580,7 +614,7 @@ test('TC_S4_4 broker skill: an answer without points and one with points as a st
 
 test('fix1 broker skill: README 0.2.1 notes match the server and do not overstate', () => {
   const readme = fs.readFileSync(path.join(SKILL_DIR, 'README.md'), 'utf8').replace(/\s+/g, ' ');
-  const notes = readme.slice(readme.indexOf('## 0.2.1'), readme.indexOf('## Iterating'));
+  const notes = readme.slice(readme.indexOf('## 0.2.1'), readme.indexOf('## 0.2.2'));
   assert.match(notes, /0\.2\.1/);
   assert.match(notes, /the item itself and the matching to-dos and calendar items without asking/);
   assert.match(notes, /from the item alone/);

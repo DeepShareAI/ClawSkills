@@ -94,6 +94,15 @@ ignores `label` on them.
 check. `references/examples/` holds valid and invalid submissions.
 `references/schema-lite.js` is the dependency-free validator the tests use.
 
+## 0.2.2
+
+- A label only names what its point's text says. Javis drops the label of any
+  point that cites an excerpt (conversation or voice-memo words).
+- Labels on an answer that goes to the user's approval card are shown on the
+  card next to each point's text. javis-server keeps a label on the task's
+  shared-facts record only if the user's app showed it and the user approved.
+- An exact (verbatim) answer carries no labels.
+
 ## Iterating from history
 
 Every exchange is recorded by javis-server (`agent_access_requests`, `_turns`,

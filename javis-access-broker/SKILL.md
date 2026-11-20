@@ -166,9 +166,11 @@ to get the item done.
   `sources` and a short `label` of 80 characters or fewer that names the fact,
   for example "Launch date: Fri Nov 21" or "Audience: newsletter list".
 - A label only names what its point's text says; never put anything in a
-  label that is not in that text. Javis drops the label of a point that cites
-  a conversation or voice memo, and every label of an answer that goes to the
-  user's approval card, because the card shows each point's text, not its label.
+  label that is not in that text. Javis drops the label of any point that
+  cites an excerpt (conversation or voice-memo words). When an answer goes to
+  the user's approval card, the card shows each point's label next to its
+  text, and Javis keeps a label only if the user's app showed it and the user
+  approved. An exact (verbatim) answer carries no labels.
 - The hand-over lets Javis share the item itself and the matching to-dos and
   calendar items without asking. Answer from those first.
 - When the question is what the item is, or when it is due or was noted,
